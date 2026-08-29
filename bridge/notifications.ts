@@ -23,15 +23,21 @@ const MAX_BODY_CHARS = 160;
 const COPY_SEPARATOR = " · ";
 const DIGEST_SEPARATOR = "; ";
 const UNREADABLE_LABEL = /^[\s\p{Default_Ignorable_Code_Point}]+$/u;
+const GRAPHEMES =
+  typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
 
 function cleanLabel(value: string | null | undefined): string | undefined {
   const clean = value?.replace(/\s+/g, " ").trim();
   return clean && !UNREADABLE_LABEL.test(clean) ? clean : undefined;
 }
 
-/** Clamp by Unicode code point so an ellipsis never leaves half a surrogate pair behind. */
+/** Clamp by grapheme when supported, degrading to surrogate-safe code points on older engines. */
 function clampCopy(value: string, maxChars: number): string {
-  const chars = [...value];
+  const chars = GRAPHEMES
+    ? [...GRAPHEMES.segment(value)].map((part) => part.segment)
+    : [...value];
   return chars.length <= maxChars ? value : `${chars.slice(0, maxChars - 1).join("")}…`;
 }
 
@@ -256,10 +262,7 @@ export class NotificationCoordinator<H = unknown> {
         : `${n} tasks need attention`;
     const separatorChars = [...DIGEST_SEPARATOR].length * (n - 1);
     const itemBudget = Math.max(1, Math.floor((MAX_BODY_CHARS - separatorChars) / n));
-    const items = alerts.map((a) => {
-      const item = a.work.toLowerCase() === a.agent.toLowerCase() ? a.work : `${a.work} (${a.agent})`;
-      return clampCopy(item, itemBudget);
-    });
+    const items = alerts.map((a) => clampCopy(`${a.work} (${a.context})`, itemBudget));
     const body = clampCopy(items.join(DIGEST_SEPARATOR), MAX_BODY_CHARS);
     return { title, body, renotify };
   }

@@ -175,6 +175,22 @@ describe("NotificationCoordinator — notification copy", () => {
     expect(sink.last?.title).toBe("Done: Review auth diff");
   });
 
+  test("keeps joined emoji intact when clamping a title", () => {
+    const { clock, sink, coord } = setup();
+    const family = "👨‍👩‍👧‍👦";
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", { terminalTitle: family.repeat(120) }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    const clusters = [
+      ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(sink.last!.title),
+    ];
+    expect(clusters).toHaveLength(96);
+    expect(sink.last!.title.endsWith(`${family}…`)).toBe(true);
+  });
+
   test("falls back through session, tab, workspace and ignores empty labels", () => {
     const cases: Array<[Partial<AgentView>, string]> = [
       [{ paneLabel: " ", terminalTitle: "", sessionName: "named-session", tabLabel: "api" }, "named-session"],
@@ -227,7 +243,7 @@ describe("NotificationCoordinator — coalescing", () => {
     // p1 renders as a single, then p2 promotes it to a digest.
     expect(sink.renders.at(-1)).toEqual({
       title: "2 tasks need you",
-      body: "Review auth (claude); Ship release (codex)",
+      body: "Review auth (claude · demo); Ship release (codex · demo)",
       paneId: undefined,
       renotify: true,
     });
@@ -247,7 +263,31 @@ describe("NotificationCoordinator — coalescing", () => {
     );
     clock.fireAll();
     expect([...sink.last!.body].length).toBeLessThanOrEqual(160);
-    expect(sink.last!.body).toContain("…; Ship release (codex)");
+    expect(sink.last!.body).toContain("…; Ship release (codex · demo)");
+  });
+
+  test("distinguishes duplicate work names with each pane's compact context", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", {
+        terminalTitle: "Review",
+        workspaceLabel: "api",
+        tabLabel: "backend",
+      }),
+      "working",
+      "done",
+    );
+    coord.onTransition(
+      agentNamed("p2", "claude", "done", {
+        terminalTitle: "Review",
+        workspaceLabel: "web",
+        tabLabel: "frontend",
+      }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    expect(sink.last!.body).toBe("Review (claude · api · backend); Review (claude · web · frontend)");
   });
 
   test("a mixed blocked+done herd reads as 'need attention'", () => {
