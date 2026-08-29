@@ -59,7 +59,12 @@ class RecordingSink implements NotifySink {
   }
 }
 
-function agentNamed(paneId: string, name: string, status: AgentStatus): AgentView {
+function agentNamed(
+  paneId: string,
+  name: string,
+  status: AgentStatus,
+  overrides: Partial<AgentView> = {},
+): AgentView {
   return {
     paneId,
     workspaceId: "w1",
@@ -71,6 +76,7 @@ function agentNamed(paneId: string, name: string, status: AgentStatus): AgentVie
     cwd: "/home/you/demo",
     focused: false,
     kind: "agent",
+    ...overrides,
   };
 }
 const agent = (paneId: string, status: AgentStatus) => agentNamed(paneId, "claude", status);
@@ -96,8 +102,8 @@ describe("NotificationCoordinator — debounce", () => {
     expect(sink.events).toEqual([]); // armed, not yet fired
     clock.fireAll();
     expect(sink.last).toEqual({
-      title: "claude needs you",
-      body: "demo · /home/you/demo",
+      title: "Needs you: demo",
+      body: "claude",
       paneId: "p1",
       renotify: true,
     });
@@ -112,24 +118,114 @@ describe("NotificationCoordinator — debounce", () => {
     expect(clock.armed).toBe(0);
   });
 
-  test("'done' uses the 'is done' verb", () => {
+  test("done copy leads with the status", () => {
     const { clock, sink, coord } = setup();
     coord.onTransition(agent("p1", "done"), "working", "done");
     clock.fireAll();
-    expect(sink.last?.title).toBe("claude is done");
+    expect(sink.last?.title).toBe("Done: demo");
+  });
+});
+
+describe("NotificationCoordinator — notification copy", () => {
+  test("leads with an explicit pane label and keeps compact context in the body", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", {
+        paneLabel: "Ship auth fix",
+        terminalTitle: "Running tests",
+        sessionName: "auth-session",
+        tabLabel: "backend",
+      }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    expect(sink.last).toMatchObject({
+      title: "Done: Ship auth fix",
+      body: "claude · demo · backend",
+    });
+  });
+
+  test("prefers the live terminal task over the stable session name", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "omo", "blocked", {
+        terminalTitle: "Review notification diff",
+        sessionName: "collie-custom",
+      }),
+      "working",
+      "blocked",
+    );
+    clock.fireAll();
+    expect(sink.last).toMatchObject({
+      title: "Needs you: Review notification diff",
+      body: "omo · demo",
+    });
+  });
+
+  test("normalizes work-title whitespace", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", { terminalTitle: "  Review\n   auth diff  " }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    expect(sink.last?.title).toBe("Done: Review auth diff");
+  });
+
+  test("falls back through session, tab, workspace and ignores empty labels", () => {
+    const cases: Array<[Partial<AgentView>, string]> = [
+      [{ paneLabel: " ", terminalTitle: "", sessionName: "named-session", tabLabel: "api" }, "named-session"],
+      [{ paneLabel: " ", terminalTitle: "", sessionName: "", tabLabel: "api" }, "api"],
+      [{ paneLabel: " ", terminalTitle: "", sessionName: "", tabLabel: "" }, "demo"],
+    ];
+    for (const [overrides, expected] of cases) {
+      const { clock, sink, coord } = setup();
+      coord.onTransition(agentNamed("p1", "claude", "done", overrides), "working", "done");
+      clock.fireAll();
+      expect(sink.last?.title).toBe(`Done: ${expected}`);
+    }
+  });
+
+  test("deduplicates context and clamps mobile copy by code point", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", {
+        terminalTitle: `  ${"🧪".repeat(120)}  `,
+        workspaceLabel: "w".repeat(200),
+        cwd: `/home/you/${"w".repeat(200)}`,
+      }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    expect([...sink.last!.title]).toHaveLength(96);
+    expect(sink.last!.title.endsWith("…")).toBe(true);
+    expect([...sink.last!.body]).toHaveLength(160);
+    expect(sink.last!.body.endsWith("…")).toBe(true);
+    expect(sink.last!.body).not.toContain("/home/you");
   });
 });
 
 describe("NotificationCoordinator — coalescing", () => {
   test("two outstanding agents collapse into one digest that buzzes", () => {
     const { clock, sink, coord } = setup();
-    coord.onTransition(agentNamed("p1", "claude", "blocked"), "working", "blocked");
-    coord.onTransition(agentNamed("p2", "codex", "blocked"), "working", "blocked");
+    coord.onTransition(
+      agentNamed("p1", "claude", "blocked", { paneLabel: "Review auth" }),
+      "working",
+      "blocked",
+    );
+    coord.onTransition(
+      agentNamed("p2", "codex", "blocked", { terminalTitle: "Ship release" }),
+      "working",
+      "blocked",
+    );
     clock.fireAll();
     // p1 renders as a single, then p2 promotes it to a digest.
     expect(sink.renders.at(-1)).toEqual({
-      title: "2 agents need you",
-      body: "claude, codex",
+      title: "2 tasks need you",
+      body: "Review auth (claude); Ship release (codex)",
       paneId: undefined,
       renotify: true,
     });
@@ -140,7 +236,7 @@ describe("NotificationCoordinator — coalescing", () => {
     coord.onTransition(agentNamed("p1", "claude", "blocked"), "working", "blocked");
     coord.onTransition(agentNamed("p2", "codex", "done"), "working", "done");
     clock.fireAll();
-    expect(sink.last?.title).toBe("2 agents need attention");
+    expect(sink.last?.title).toBe("2 tasks need attention");
   });
 
   test("resolving one of two falls back to the named single, silently", () => {
@@ -150,8 +246,8 @@ describe("NotificationCoordinator — coalescing", () => {
     clock.fireAll();
     coord.onTransition(agentNamed("p2", "codex", "idle"), "blocked", "idle"); // codex handled
     expect(sink.last).toEqual({
-      title: "claude needs you",
-      body: "demo · /home/you/demo",
+      title: "Needs you: demo",
+      body: "claude",
       paneId: "p1",
       renotify: false, // a retraction update must not re-buzz
     });
@@ -207,7 +303,7 @@ describe("NotificationCoordinator — type preferences", () => {
     coord.onTransition(agent("p1", "done"), "working", "done");
     expect(sink.events).toEqual([]); // still debouncing
     clock.fireAll();
-    expect(sink.last?.title).toBe("claude is done");
+    expect(sink.last?.title).toBe("Done: demo");
   });
 
   test("with blocked disabled, a blocked transition doesn't push", () => {
@@ -222,7 +318,7 @@ describe("NotificationCoordinator — type preferences", () => {
     const { clock, sink, coord, prefs } = setup({ blocked: true, done: true });
     coord.onTransition(agent("p1", "done"), "working", "done");
     clock.fireAll();
-    expect(sink.last?.title).toBe("claude is done"); // delivered
+    expect(sink.last?.title).toBe("Done: demo"); // delivered
     prefs.done = false; // preference changes at runtime…
     coord.applyPrefs(); // …and the API hook re-evaluates the herd
     expect(sink.events.at(-1)).toEqual({ kind: "clear" }); // the done alert is retracted
@@ -243,7 +339,7 @@ describe("NotificationCoordinator — type preferences", () => {
     const { clock, sink, coord } = setup({ blocked: true, done: false });
     coord.onTransition(agent("p1", "blocked"), "working", "blocked");
     clock.fireAll();
-    expect(sink.last?.title).toBe("claude needs you");
+    expect(sink.last?.title).toBe("Needs you: demo");
     // The agent completes, but done pushes are disabled — so this is a non-notifiable transition
     // that resolves (retracts) the outstanding blocked alert rather than replacing it.
     coord.onTransition(agent("p1", "done"), "blocked", "done");

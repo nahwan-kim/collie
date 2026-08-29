@@ -121,9 +121,11 @@ Product details that shaped the loop:
 
 **Known gap — the notification body doesn't carry the question.** The design called for putting the
 agent's question *in* the notification, so a tap is actionable even before the app loads (§7 explains
-why that matters on Android). What ships identifies **which** agent needs you — title `<agent>
-<verb>`, body `<workspace> · <cwd>` (`bridge/notifications.ts`) — and you read the question in the
-app. Closing this needs the server-side blocking-message capture described above.
+why that matters on Android). What ships identifies **which work item** needs you — title `Needs you:
+<work>` / `Done: <work>`, body `<agent> · <workspace> [· <tab>]` (`bridge/notifications.ts`) — and you
+read the question in the app. Work naming prefers an explicit pane label, then its live terminal title,
+then its session name. Closing the remaining gap needs the server-side blocking-message capture
+described above.
 
 ## 5. Architecture notes
 

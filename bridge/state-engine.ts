@@ -311,6 +311,13 @@ export class StateEngine {
         paneCount: t.pane_count,
       }));
 
+      // Transition listeners run before the pane reads below, so restore each sticky /rename value
+      // now. Notifications can then name the session that the previous successful poll already learned.
+      for (const a of agents) {
+        const name = this.sessionNames.get(a.paneId);
+        if (name) a.sessionName = name;
+      }
+
       // Detect transitions against the previous poll. First sighting of a pane never fires a
       // transition (so we don't notify for agents already blocked when the bridge starts).
       for (const a of agents) {

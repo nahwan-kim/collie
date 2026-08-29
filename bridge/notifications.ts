@@ -8,8 +8,8 @@ import type { AgentStatus, AgentView } from "./types.ts";
 //     desk) never reaches your phone. Herdr exposes no "user present" signal (only a `focused` pane,
 //     no activity timestamp), so we infer presence: a quickly-resolved transition is an at-desk one.
 //   • Coalesce — instead of N stacked notifications, we keep ONE summary of everything currently
-//     outstanding: the named agent when exactly one needs you, or "N agents need you" for several.
-//     Each change re-renders that single summary; when the last one resolves, we clear it.
+//     outstanding. Its copy leads with the work name, not the generic harness name, and each change
+//     re-renders that single summary; when the last one resolves, we clear it.
 //   • Retract — clearing an agent at the PC (or its pane closing) updates or removes the summary, so
 //     handled work never lingers on your lock screen.
 //
@@ -17,6 +17,55 @@ import type { AgentStatus, AgentView } from "./types.ts";
 // setTimeout/clearTimeout (see server.ts); tests pass a fake clock they fire on demand.
 
 type NotifiableStatus = "blocked" | "done";
+
+const MAX_TITLE_CHARS = 96;
+const MAX_BODY_CHARS = 160;
+const COPY_SEPARATOR = " · ";
+
+function cleanLabel(value: string | null | undefined): string | undefined {
+  const clean = value?.replace(/\s+/g, " ").trim();
+  return clean || undefined;
+}
+
+/** Clamp by Unicode code point so an ellipsis never leaves half a surrogate pair behind. */
+function clampCopy(value: string, maxChars: number): string {
+  const chars = [...value];
+  return chars.length <= maxChars ? value : `${chars.slice(0, maxChars - 1).join("")}…`;
+}
+
+function pathTail(value: string): string | undefined {
+  const clean = cleanLabel(value)?.replace(/[\\/]+$/, "");
+  return cleanLabel(clean?.split(/[\\/]/).at(-1));
+}
+
+/** The thing the notification is ABOUT. Explicit operator naming wins, then live work, then session. */
+function workLabel(agent: AgentView): string {
+  const candidates = [
+    agent.paneLabel,
+    agent.terminalTitle,
+    agent.sessionName,
+    agent.tabLabel,
+    agent.workspaceLabel,
+    pathTail(agent.cwd),
+    agent.agent,
+  ];
+  return candidates.map(cleanLabel).find((label): label is string => label !== undefined) ?? "Agent";
+}
+
+/** Compact locator for the body, excluding anything already promoted into the title. */
+function contextLabel(agent: AgentView, work: string): string {
+  const parts: string[] = [];
+  const seen = new Set([work.toLowerCase()]);
+  for (const candidate of [agent.agent, agent.workspaceLabel, agent.tabLabel, pathTail(agent.cwd)]) {
+    const label = cleanLabel(candidate);
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parts.push(label);
+  }
+  return clampCopy(parts.join(COPY_SEPARATOR) || cleanLabel(agent.agent) || "Agent", MAX_BODY_CHARS);
+}
 
 /** The timer primitive the coordinator schedules against — real setTimeout in the bridge, fake in tests. */
 export interface NotifyClock<H> {
@@ -26,9 +75,9 @@ export interface NotifyClock<H> {
 
 /** The current state of the herd's single notification, derived from everything outstanding. */
 export interface HerdSummary {
-  /** Headline: "claude needs you" for one, or "3 agents need you" for several. */
+  /** Headline: "Done: Review auth" for one, or "3 tasks need you" for several. */
   title: string;
-  /** Sub-line: "demo · /path" for one outstanding alert, or the agent names for a digest. */
+  /** Compact agent/workspace context for one alert, or named work items for a digest. */
   body: string;
   /** Deep-link target when exactly one alert is outstanding; undefined for a multi-agent digest. */
   paneId?: string;
@@ -82,8 +131,8 @@ export function makeNotifySink(
 
 interface Alert {
   agent: string;
-  workspaceLabel: string;
-  cwd: string;
+  work: string;
+  context: string;
   status: NotifiableStatus;
 }
 
@@ -113,10 +162,11 @@ export class NotificationCoordinator<H = unknown> {
     }
     // (Re)arm the debounce. A blocked→done flip lands here too, so only the latest verb survives.
     this.cancelPending(id);
+    const work = workLabel(agent);
     const alert: Alert = {
-      agent: agent.agent,
-      workspaceLabel: agent.workspaceLabel,
-      cwd: agent.cwd,
+      agent: cleanLabel(agent.agent) ?? "Agent",
+      work,
+      context: contextLabel(agent, work),
       status: to as NotifiableStatus,
     };
     const handle = this.clock.schedule(() => {
@@ -184,11 +234,11 @@ export class NotificationCoordinator<H = unknown> {
     const entries = [...this.outstanding.entries()];
     if (entries.length === 1) {
       const [paneId, a] = entries[0]!;
-      const verb = a.status === "blocked" ? "needs you" : "is done";
-      // One outstanding agent → deep-link straight to its pane on tap.
+      const prefix = a.status === "blocked" ? "Needs you" : "Done";
+      // One outstanding task → deep-link straight to its pane on tap.
       return {
-        title: `${a.agent} ${verb}`,
-        body: `${a.workspaceLabel} · ${a.cwd}`,
+        title: clampCopy(`${prefix}: ${a.work}`, MAX_TITLE_CHARS),
+        body: a.context,
         paneId,
         renotify,
       };
@@ -198,11 +248,15 @@ export class NotificationCoordinator<H = unknown> {
     const allBlocked = alerts.every((a) => a.status === "blocked");
     const allDone = alerts.every((a) => a.status === "done");
     const title = allBlocked
-      ? `${n} agents need you`
+      ? `${n} tasks need you`
       : allDone
-        ? `${n} agents done`
-        : `${n} agents need attention`;
-    return { title, body: alerts.map((a) => a.agent).join(", "), renotify };
+        ? `${n} tasks done`
+        : `${n} tasks need attention`;
+    const items = alerts.map((a) =>
+      a.work.toLowerCase() === a.agent.toLowerCase() ? a.work : `${a.work} (${a.agent})`,
+    );
+    const body = clampCopy(items.join("; "), MAX_BODY_CHARS);
+    return { title, body, renotify };
   }
 
   private cancelPending(id: string): void {
