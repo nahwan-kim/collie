@@ -175,6 +175,17 @@ describe("NotificationCoordinator — notification copy", () => {
     expect(sink.last?.title).toBe("Done: Review auth diff");
   });
 
+  test("removes embedded bidi controls without disturbing visible text", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", { paneLabel: "Auth\u{202E}cod.exe\u{202C} review" }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    expect(sink.last!.title).toBe("Done: Auth cod.exe review");
+  });
+
   test("keeps joined emoji intact when clamping a title", () => {
     const { clock, sink, coord } = setup();
     const family = "👨‍👩‍👧‍👦";

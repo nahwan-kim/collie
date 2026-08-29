@@ -28,6 +28,7 @@ const MAX_DIGEST_ITEMS = 4;
 const COPY_SEPARATOR = " · ";
 const DIGEST_SEPARATOR = "; ";
 const CONTROL_CHARACTERS = /\p{Cc}+/gu;
+const BIDI_CONTROLS = /\p{Bidi_Control}+/gu;
 const UNREADABLE_LABEL = /^[\s\p{Default_Ignorable_Code_Point}\p{M}]+$/u;
 const GRAPHEMES =
   typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
@@ -39,7 +40,11 @@ function graphemes(value: string): string[] {
 }
 
 function cleanLabel(value: string | null | undefined): string | undefined {
-  const clean = value?.replace(CONTROL_CHARACTERS, " ").replace(/\s+/g, " ").trim();
+  const clean = value
+    ?.replace(BIDI_CONTROLS, " ")
+    .replace(CONTROL_CHARACTERS, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!clean || UNREADABLE_LABEL.test(clean)) return undefined;
   if (graphemes(clean).some((cluster) => [...cluster].length > MAX_LABEL_CLUSTER_CODE_POINTS)) {
     return undefined;
