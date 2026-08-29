@@ -20,25 +20,55 @@ type NotifiableStatus = "blocked" | "done";
 
 const MAX_TITLE_CHARS = 96;
 const MAX_BODY_CHARS = 160;
+// Independent from display length: a single grapheme can contain unbounded marks and overflow push payloads.
+const MAX_COPY_CODE_POINTS = 256;
+const MAX_LABEL_CLUSTER_CODE_POINTS = 128;
+// Keep the newest work visible; the count prefix is more useful than dozens of one-character fragments.
+const MAX_DIGEST_ITEMS = 4;
 const COPY_SEPARATOR = " · ";
 const DIGEST_SEPARATOR = "; ";
-const UNREADABLE_LABEL = /^[\s\p{Default_Ignorable_Code_Point}]+$/u;
+const CONTROL_CHARACTERS = /\p{Cc}+/gu;
+const UNREADABLE_LABEL = /^[\s\p{Default_Ignorable_Code_Point}\p{M}]+$/u;
 const GRAPHEMES =
   typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
     ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
     : null;
 
-function cleanLabel(value: string | null | undefined): string | undefined {
-  const clean = value?.replace(/\s+/g, " ").trim();
-  return clean && !UNREADABLE_LABEL.test(clean) ? clean : undefined;
+function graphemes(value: string): string[] {
+  return GRAPHEMES ? [...GRAPHEMES.segment(value)].map((part) => part.segment) : [...value];
 }
 
-/** Clamp by grapheme when supported, degrading to surrogate-safe code points on older engines. */
-function clampCopy(value: string, maxChars: number): string {
-  const chars = GRAPHEMES
-    ? [...GRAPHEMES.segment(value)].map((part) => part.segment)
-    : [...value];
-  return chars.length <= maxChars ? value : `${chars.slice(0, maxChars - 1).join("")}…`;
+function cleanLabel(value: string | null | undefined): string | undefined {
+  const clean = value?.replace(CONTROL_CHARACTERS, " ").replace(/\s+/g, " ").trim();
+  if (!clean || UNREADABLE_LABEL.test(clean)) return undefined;
+  if (graphemes(clean).some((cluster) => [...cluster].length > MAX_LABEL_CLUSTER_CODE_POINTS)) {
+    return undefined;
+  }
+  return clean;
+}
+
+/** Grapheme-safe display clamp with a secondary transport bound for adversarial dense copy. */
+function clampCopy(
+  value: string,
+  maxChars: number,
+  maxCodePoints = MAX_COPY_CODE_POINTS,
+): string {
+  const chars = graphemes(value);
+  if (chars.length <= maxChars && [...value].length <= maxCodePoints) return value;
+  const kept: string[] = [];
+  let keptCodePoints = 0;
+  for (const cluster of chars) {
+    const clusterCodePoints = [...cluster].length;
+    if (
+      kept.length >= maxChars - 1 ||
+      keptCodePoints + clusterCodePoints > maxCodePoints - 1
+    ) {
+      break;
+    }
+    kept.push(cluster);
+    keptCodePoints += clusterCodePoints;
+  }
+  return `${kept.join("")}…`;
 }
 
 function pathTail(value: string): string | undefined {
@@ -260,10 +290,22 @@ export class NotificationCoordinator<H = unknown> {
       : allDone
         ? `${n} tasks done`
         : `${n} tasks need attention`;
-    const separatorChars = [...DIGEST_SEPARATOR].length * (n - 1);
-    const itemBudget = Math.max(1, Math.floor((MAX_BODY_CHARS - separatorChars) / n));
-    const items = alerts.map((a) => clampCopy(`${a.work} (${a.context})`, itemBudget));
-    const body = clampCopy(items.join(DIGEST_SEPARATOR), MAX_BODY_CHARS);
+    const visible = alerts.slice(-MAX_DIGEST_ITEMS);
+    const hidden = n - visible.length;
+    const prefix = hidden > 0 ? `+${hidden} earlier${DIGEST_SEPARATOR}` : "";
+    const separatorChars = [...DIGEST_SEPARATOR].length * (visible.length - 1);
+    const itemBudget = Math.max(
+      1,
+      Math.floor((MAX_BODY_CHARS - [...prefix].length - separatorChars) / visible.length),
+    );
+    const itemCodePointBudget = Math.max(
+      1,
+      Math.floor((MAX_COPY_CODE_POINTS - [...prefix].length - separatorChars) / visible.length),
+    );
+    const items = visible.map((a) =>
+      clampCopy(`${a.work} (${a.context})`, itemBudget, itemCodePointBudget),
+    );
+    const body = clampCopy(`${prefix}${items.join(DIGEST_SEPARATOR)}`, MAX_BODY_CHARS);
     return { title, body, renotify };
   }
 

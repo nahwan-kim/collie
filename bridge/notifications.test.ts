@@ -187,14 +187,34 @@ describe("NotificationCoordinator — notification copy", () => {
     const clusters = [
       ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(sink.last!.title),
     ];
-    expect(clusters).toHaveLength(96);
+    expect(clusters.length).toBeLessThanOrEqual(96);
+    expect([...sink.last!.title].length).toBeLessThanOrEqual(256);
     expect(sink.last!.title.endsWith(`${family}…`)).toBe(true);
+  });
+
+  test("rejects a giant combining-mark grapheme and uses a useful fallback", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", { terminalTitle: `A${"\u{0301}".repeat(1000)}` }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    expect(sink.last!.title).toBe("Done: demo");
   });
 
   test("falls back through session, tab, workspace and ignores empty labels", () => {
     const cases: Array<[Partial<AgentView>, string]> = [
       [{ paneLabel: " ", terminalTitle: "", sessionName: "named-session", tabLabel: "api" }, "named-session"],
       [{ paneLabel: "\u{200B}", terminalTitle: "\u{2060}", sessionName: "visible-session" }, "visible-session"],
+      [
+        {
+          paneLabel: "\u{0000}\u{001B}",
+          terminalTitle: "\u{0301}\u{0308}",
+          sessionName: "safe-session",
+        },
+        "safe-session",
+      ],
       [{ paneLabel: " ", terminalTitle: "", sessionName: "", tabLabel: "api" }, "api"],
       [{ paneLabel: " ", terminalTitle: "", sessionName: "", tabLabel: "" }, "demo"],
     ];
@@ -288,6 +308,22 @@ describe("NotificationCoordinator — coalescing", () => {
     );
     clock.fireAll();
     expect(sink.last!.body).toBe("Review (claude · api · backend); Review (claude · web · frontend)");
+  });
+
+  test("shows recent work plus an explicit count for a high-cardinality digest", () => {
+    const { clock, sink, coord } = setup();
+    for (let i = 0; i < 41; i += 1) {
+      coord.onTransition(
+        agentNamed(`p${i}`, "claude", "done", { terminalTitle: `Task ${i}` }),
+        "working",
+        "done",
+      );
+    }
+    clock.fireAll();
+    expect(sink.last!.title).toBe("41 tasks done");
+    expect(sink.last!.body.startsWith("+37 earlier; Task 37")).toBe(true);
+    expect(sink.last!.body).toContain("Task 40 (claude · demo)");
+    expect([...sink.last!.body].length).toBeLessThanOrEqual(160);
   });
 
   test("a mixed blocked+done herd reads as 'need attention'", () => {

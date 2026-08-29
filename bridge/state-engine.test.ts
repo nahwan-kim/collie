@@ -401,17 +401,41 @@ describe("StateEngine — session name enrichment", () => {
   });
 
   test("does not leak a cached Claude session name to a replacement harness", async () => {
-    const { herdr, engine, poll } = makeNameEngine();
+    const { herdr, engine, poll, agent } = makeNameEngine();
     const transitions: Array<{ agent: string; sessionName?: string }> = [];
     engine.onTransition((a) =>
       transitions.push({ agent: a.agent, ...(a.sessionName ? { sessionName: a.sessionName } : {}) }),
     );
-    herdr.panes = [pane("w1:p1", "w1", "working", "claude")];
+    herdr.panes = [
+      pane("w1:p1", "w1", "working", "claude"),
+      pane("w1:p2", "w1", "idle", "claude"),
+    ];
     herdr.texts.set("w1:p1", named("claude-work"));
+    herdr.texts.set("w1:p2", named("other-claude"));
     await poll();
-    herdr.panes = [pane("w1:p1", "w1", "done", "codex")];
+    herdr.panes = [
+      pane("w1:p1", "w1", "done", "codex"),
+      pane("w1:p2", "w1", "idle", "claude"),
+    ];
     await poll();
     expect(transitions).toEqual([{ agent: "codex" }]);
+    expect(agent("w1:p1").sessionName).toBeUndefined();
+  });
+
+  test("clears the old session before Claude returns to the same pane", async () => {
+    const { herdr, engine, poll } = makeNameEngine();
+    const transitionNames: Array<string | undefined> = [];
+    engine.onTransition((a) => transitionNames.push(a.sessionName));
+    herdr.panes = [pane("w1:p1", "w1", "working", "claude")];
+    herdr.texts.set("w1:p1", named("old-session"));
+    await poll();
+    herdr.panes = [pane("w1:p1", "w1", "working", "codex")];
+    await poll();
+    herdr.panes = [pane("w1:p1", "w1", "done", "claude")];
+    herdr.texts.set("w1:p1", plainBox);
+    await poll();
+    expect(transitionNames).toEqual([undefined]);
+    expect(engine.current().agents[0]!.sessionName).toBeUndefined();
   });
 
   // The scroll-jump guard. A `recent` read that wants more rows than the pane shows makes Herdr
