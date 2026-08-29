@@ -135,6 +135,7 @@ describe("NotificationCoordinator — notification copy", () => {
         terminalTitle: "Running tests",
         sessionName: "auth-session",
         tabLabel: "backend",
+        cwd: "/home/you/worktree",
       }),
       "working",
       "done",
@@ -177,6 +178,7 @@ describe("NotificationCoordinator — notification copy", () => {
   test("falls back through session, tab, workspace and ignores empty labels", () => {
     const cases: Array<[Partial<AgentView>, string]> = [
       [{ paneLabel: " ", terminalTitle: "", sessionName: "named-session", tabLabel: "api" }, "named-session"],
+      [{ paneLabel: "\u{200B}", terminalTitle: "\u{2060}", sessionName: "visible-session" }, "visible-session"],
       [{ paneLabel: " ", terminalTitle: "", sessionName: "", tabLabel: "api" }, "api"],
       [{ paneLabel: " ", terminalTitle: "", sessionName: "", tabLabel: "" }, "demo"],
     ];
@@ -229,6 +231,23 @@ describe("NotificationCoordinator — coalescing", () => {
       paneId: undefined,
       renotify: true,
     });
+  });
+
+  test("budgets digest items independently so a long first task cannot erase later work", () => {
+    const { clock, sink, coord } = setup();
+    coord.onTransition(
+      agentNamed("p1", "claude", "done", { terminalTitle: "A".repeat(300) }),
+      "working",
+      "done",
+    );
+    coord.onTransition(
+      agentNamed("p2", "codex", "done", { terminalTitle: "Ship release" }),
+      "working",
+      "done",
+    );
+    clock.fireAll();
+    expect([...sink.last!.body].length).toBeLessThanOrEqual(160);
+    expect(sink.last!.body).toContain("…; Ship release (codex)");
   });
 
   test("a mixed blocked+done herd reads as 'need attention'", () => {

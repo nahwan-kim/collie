@@ -400,6 +400,20 @@ describe("StateEngine — session name enrichment", () => {
     expect(transitionNames).toEqual(["notification-work"]);
   });
 
+  test("does not leak a cached Claude session name to a replacement harness", async () => {
+    const { herdr, engine, poll } = makeNameEngine();
+    const transitions: Array<{ agent: string; sessionName?: string }> = [];
+    engine.onTransition((a) =>
+      transitions.push({ agent: a.agent, ...(a.sessionName ? { sessionName: a.sessionName } : {}) }),
+    );
+    herdr.panes = [pane("w1:p1", "w1", "working", "claude")];
+    herdr.texts.set("w1:p1", named("claude-work"));
+    await poll();
+    herdr.panes = [pane("w1:p1", "w1", "done", "codex")];
+    await poll();
+    expect(transitions).toEqual([{ agent: "codex" }]);
+  });
+
   // The scroll-jump guard. A `recent` read that wants more rows than the pane shows makes Herdr
   // harvest the pages above it, and on a full-screen agent that means scrolling the operator's pane
   // up and back — once per poll, per idle claude pane. Nothing in the types stops the source from

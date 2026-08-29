@@ -314,7 +314,7 @@ export class StateEngine {
       // Transition listeners run before the pane reads below, so restore each sticky /rename value
       // now. Notifications can then name the session that the previous successful poll already learned.
       for (const a of agents) {
-        const name = this.sessionNames.get(a.paneId);
+        const name = a.agent === "claude" ? this.sessionNames.get(a.paneId) : undefined;
         if (name) a.sessionName = name;
       }
 

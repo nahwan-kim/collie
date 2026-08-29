@@ -21,10 +21,12 @@ type NotifiableStatus = "blocked" | "done";
 const MAX_TITLE_CHARS = 96;
 const MAX_BODY_CHARS = 160;
 const COPY_SEPARATOR = " · ";
+const DIGEST_SEPARATOR = "; ";
+const UNREADABLE_LABEL = /^[\s\p{Default_Ignorable_Code_Point}]+$/u;
 
 function cleanLabel(value: string | null | undefined): string | undefined {
   const clean = value?.replace(/\s+/g, " ").trim();
-  return clean || undefined;
+  return clean && !UNREADABLE_LABEL.test(clean) ? clean : undefined;
 }
 
 /** Clamp by Unicode code point so an ellipsis never leaves half a surrogate pair behind. */
@@ -56,7 +58,7 @@ function workLabel(agent: AgentView): string {
 function contextLabel(agent: AgentView, work: string): string {
   const parts: string[] = [];
   const seen = new Set([work.toLowerCase()]);
-  for (const candidate of [agent.agent, agent.workspaceLabel, agent.tabLabel, pathTail(agent.cwd)]) {
+  for (const candidate of [agent.agent, agent.workspaceLabel, agent.tabLabel]) {
     const label = cleanLabel(candidate);
     if (!label) continue;
     const key = label.toLowerCase();
@@ -252,10 +254,13 @@ export class NotificationCoordinator<H = unknown> {
       : allDone
         ? `${n} tasks done`
         : `${n} tasks need attention`;
-    const items = alerts.map((a) =>
-      a.work.toLowerCase() === a.agent.toLowerCase() ? a.work : `${a.work} (${a.agent})`,
-    );
-    const body = clampCopy(items.join("; "), MAX_BODY_CHARS);
+    const separatorChars = [...DIGEST_SEPARATOR].length * (n - 1);
+    const itemBudget = Math.max(1, Math.floor((MAX_BODY_CHARS - separatorChars) / n));
+    const items = alerts.map((a) => {
+      const item = a.work.toLowerCase() === a.agent.toLowerCase() ? a.work : `${a.work} (${a.agent})`;
+      return clampCopy(item, itemBudget);
+    });
+    const body = clampCopy(items.join(DIGEST_SEPARATOR), MAX_BODY_CHARS);
     return { title, body, renotify };
   }
 
