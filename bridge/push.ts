@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
@@ -138,6 +139,20 @@ function describeSendError(err: unknown): string {
 
 /** web-push delivery options (collapse topic + TTL + urgency), derived per message from its `type`. */
 export type SendOptions = { TTL: number; topic: string; urgency?: "very-low" | "low" | "normal" | "high" };
+/** A pane notification gets its own collapse topic. Digest/prefix values never enter this hash. */
+export function paneTopicFor(session: string | undefined, paneId: string): string {
+  const input = JSON.stringify([session ?? "", paneId]);
+  const topic = createHash("sha256").update(input).digest("base64url").slice(0, 18);
+  // SHA-256/base64url always yields this shape; keep the predicate here as a regression guard.
+  return topicIsSendable(topic) ? topic : "AAAAAAAAAAAAAAAAAA";
+}
+/** A named-session summary gets its own collapse topic. Domain separation keeps it distinct from pane topics. */
+export function summaryTopicFor(session: string): string {
+  const input = JSON.stringify(["summary", session]);
+  const topic = createHash("sha256").update(input).digest("base64url").slice(0, 18);
+  // SHA-256/base64url always yields this shape; keep the predicate here as a regression guard.
+  return topicIsSendable(topic) ? topic : "AAAAAAAAAAAAAAAAAA";
+}
 
 /** Delivers one payload to one subscription with the given options. Injectable so the prune/log
  *  logic is testable. */
@@ -170,6 +185,14 @@ export interface PushMessage {
    *  absent = today's pane deep-link (so the agent-alert payload is unchanged). */
   target?: "settings";
   renotify?: boolean;
+  /** Internal push-service collapse key. Stripped before the service-worker JSON is built. */
+  topic?: string;
+  /** Internal Web Push urgency hint. Stripped before the service-worker JSON is built. */
+  urgency?: "high" | "normal";
+  /** Whether the browser notification should be quiet. Kept in the service-worker payload. */
+  silent?: boolean;
+  /** Bridge-selected vibration pattern. Kept in the service-worker payload. */
+  vibrate?: number[];
 }
 
 export class Push {
@@ -186,6 +209,9 @@ export class Push {
   // Saves are funnelled through this chain so concurrent writes never interleave (last enqueued
   // wins deterministically); a failed write is swallowed here so it can't poison later saves.
   private saveChain: Promise<void> = Promise.resolve();
+  // Broadcasts are serialised independently per collapse topic. A completed entry is removed by the
+  // cleanup reaction below, while an in-flight entry remains the tail for the next send on that topic.
+  private topicChains = new Map<string, Promise<void>>();
 
   constructor(
     private readonly cfg: Config,
@@ -278,15 +304,88 @@ export class Push {
   }
 
   /** Send a notification instruction (render, clear, or update) to every subscribed device. */
-  async send(msg: PushMessage): Promise<void> {
-    // The SW reads deep-link fields from `data`. `session` is omitted for the primary (absent on the
-    // message), keeping that payload identical to the pre-multi-session shape.
-    const data: { paneId?: string; session?: string; target?: "settings" } = { paneId: msg.paneId };
-    if (msg.session !== undefined) data.session = msg.session;
-    if (msg.target !== undefined) data.target = msg.target;
-    // Per-message collapse topic — update alerts must not share the herd slot (see UPDATE_SEND_OPTIONS).
-    const options = msg.type === "update" ? UPDATE_SEND_OPTIONS : SEND_OPTIONS;
-    await this.broadcast(JSON.stringify({ ...msg, data }), options);
+  send(msg: PushMessage): Promise<void> {
+    try {
+      // The SW reads deep-link fields from `data`. `session` is omitted for the primary (absent on the
+      // message), keeping that payload identical to the pre-multi-session shape.
+      const data: { paneId?: string; session?: string; target?: "settings" } = { paneId: msg.paneId };
+      if (msg.session !== undefined) data.session = msg.session;
+      if (msg.target !== undefined) data.target = msg.target;
+
+      // `topic` and `urgency` are transport hints only. They must never be copied into the payload the
+      // service worker receives; `silent` is an actual Notification option and stays on the wire.
+      const { topic, urgency, ...wire } = msg;
+      const base = msg.type === "update" ? UPDATE_SEND_OPTIONS : SEND_OPTIONS;
+      const options: SendOptions =
+        msg.type === "update"
+          ? base
+          : {
+              ...base,
+              topic:
+                topic !== undefined && topicIsSendable(topic)
+                  ? topic
+                  : SEND_OPTIONS.topic,
+              urgency: msg.type === "clear" ? "high" : urgency ?? SEND_OPTIONS.urgency,
+            };
+      return this.enqueue(options.topic, JSON.stringify({ ...wire, data }), options);
+    } catch (err) {
+      this.logBroadcastFailure("unknown", err);
+      return Promise.resolve();
+    }
+  }
+
+  /** Wait for all currently queued broadcasts, including work queued while an earlier one settles. */
+  async flush(): Promise<void> {
+    for (;;) {
+      const current = [...this.topicChains.entries()];
+      if (current.length === 0) return;
+      await Promise.allSettled(current.map(([, chain]) => chain));
+      for (const [topic, chain] of current) {
+        if (this.topicChains.get(topic) === chain) this.topicChains.delete(topic);
+      }
+    }
+  }
+
+  private enqueue(topic: string, payload: string, options: SendOptions): Promise<void> {
+    const previous = this.topicChains.get(topic);
+    // The first item starts immediately; only later work for the same collapse topic waits. Starting
+    // unrelated topics synchronously keeps one slow push service request from head-of-line blocking all
+    // notification slots.
+    const delivery = previous
+      ? previous
+          .catch((err) => {
+            this.logBroadcastFailure(topic, err);
+          })
+          .then(() => this.broadcast(payload, options))
+      : this.broadcast(payload, options);
+    const run = delivery.catch((err) => {
+      this.logBroadcastFailure(topic, err);
+    });
+    this.topicChains.set(topic, run);
+    // Keep the queue bounded when callers never call flush (normal operation). The rejection branch
+    // is defensive; enqueue's catch above intentionally turns failures into resolved promises.
+    void run.then(
+      () => this.scheduleRetire(topic, run),
+      () => this.scheduleRetire(topic, run),
+    );
+    return run;
+  }
+
+  private retire(topic: string, chain: Promise<void>): void {
+    if (this.topicChains.get(topic) === chain) this.topicChains.delete(topic);
+  }
+
+  private scheduleRetire(topic: string, chain: Promise<void>): void {
+    const timer = setTimeout(() => this.retire(topic, chain), 0);
+    timer.unref?.();
+  }
+
+  private logBroadcastFailure(topic: string, err: unknown): void {
+    try {
+      console.warn(`[push] broadcast failed for topic ${topic}: ${describeSendError(err)}`);
+    } catch {
+      // Logging must never turn an absorbed delivery failure back into an unhandled rejection.
+    }
   }
 
   /** Convenience for a one-off render (used by the manual push-test script). */

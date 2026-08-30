@@ -245,6 +245,39 @@ export type PaneHistoryResponse =
       total: number;
       fileTruncated: boolean;
     };
+/** GET /api/pane/:id/answer — the latest assistant speech, when a journal can provide one. */
+export type PaneAnswerResponse =
+  | {
+      paneId: string;
+      available: false;
+      reason: "disabled" | "no-session" | "no-log" | "no-answer";
+    }
+  | {
+      paneId: string;
+      available: true;
+      uuid: string;
+      ts: string;
+      text: string;
+      truncated: boolean;
+    };
+
+/** A persisted notification row, with only content allowed by the active privacy policy. */
+export interface NotificationHistoryEntry {
+  id: string;
+  timestamp: number;
+  session?: string;
+  paneId: string;
+  status: "blocked" | "done";
+  work: string;
+  context: string;
+  preview?: string;
+  resolvedAt?: number;
+}
+
+/** GET /api/notifications/history — newest-first persisted notification rows. */
+export interface NotificationHistoryResponse {
+  entries: NotificationHistoryEntry[];
+}
 
 export type ActionResponse =
   | { ok: true }
@@ -331,6 +364,9 @@ export interface BridgeConfig {
   /** The operator's own Quick-dock groups. Absent when there is no `quick-replies.toml`. */
   operatorQuickReplies?: OperatorQuickReplyRow[];
 }
+export type NotifyPreview = "hidden" | "blocked" | "all";
+export type NotifyMode = "summary" | "per-task";
+export type NotifyLayout = "task-first" | "context-first" | "compact";
 
 /**
  * Notification type preferences (GET/POST /api/notifications/prefs). Which agent statuses push, set
@@ -343,6 +379,12 @@ export interface NotifyPrefs {
   done: boolean;
   /** Push when a new Collie version is available (a restart or upgrade is waiting). Default on. */
   updates: boolean;
+  /** How much assistant conversation content a push may include. Default hidden. */
+  preview: NotifyPreview;
+  /** Whether notifications are one herd summary or one row per task. Default summary. */
+  mode: NotifyMode;
+  /** Ordering of task and context fields in rendered notifications. Default task-first. */
+  layout: NotifyLayout;
 }
 
 /** Lower sorts first — "needs you" at the top. Mirrors STATUS_RANK on the server. */

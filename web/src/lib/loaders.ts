@@ -13,7 +13,13 @@
 // no flag, no race — and because a navigation aborts any in-flight revalidation, the nav is instant
 // even while a poll's doomed fetch is still hanging.
 
-import { fetchHistory, fetchPane, fetchSnapshot, isApiErrorStatus } from "@/lib/api";
+import {
+  fetchHistory,
+  fetchNotificationHistory,
+  fetchPane,
+  fetchSnapshot,
+  isApiErrorStatus,
+} from "@/lib/api";
 import { parseAnsi } from "@/lib/ansi";
 import { splitLines } from "@/lib/blocks";
 import { isLostLatched } from "@/lib/connection-health";
@@ -32,6 +38,7 @@ import type {
   DeviceAuth,
   PaneHistoryResponse,
   PaneReadResponse,
+  NotificationHistoryEntry,
   SessionSummary,
   SnapshotResponse,
   TabView,
@@ -480,5 +487,26 @@ export async function historyLoader({
   } catch (e) {
     if (isAbortError(e)) throw e; // superseded — let React Router drop it
     return { ...base, unavailable: "error" };
+  }
+}
+
+export interface NotificationHistoryData {
+  session: string | undefined;
+  entries: NotificationHistoryEntry[];
+  error: boolean;
+}
+
+export async function notificationHistoryLoader({
+  request,
+}: {
+  request?: Request;
+} = {}): Promise<NotificationHistoryData> {
+  const session = sessionFromRequest(request);
+  try {
+    const response = await fetchNotificationHistory(request?.signal);
+    return { session, entries: response.entries, error: false };
+  } catch (e) {
+    if (isAbortError(e)) throw e;
+    return { session, entries: [], error: true };
   }
 }

@@ -15,8 +15,11 @@ import {
   keysPane,
   normalizeTabLabel,
   paneReadResponse,
+  paneAnswerResponse,
   replyPane,
   resolveStaticPath,
+  parseNotifyPrefsPatch,
+  previewScrubFor,
   sendReplySteps,
   startupWarnings,
   withBuildHeader,
@@ -667,6 +670,33 @@ describe("paneReadResponse — pane read → REST body", () => {
     });
   });
 });
+describe("paneAnswerResponse — latest assistant answer selector", () => {
+  test("returns no-answer when the journal has no assistant speech", () => {
+    expect(paneAnswerResponse("w1:p1", null)).toEqual({
+      paneId: "w1:p1",
+      available: false,
+      reason: "no-answer",
+    });
+  });
+
+  test("returns the selected answer fields without exposing a session ref", () => {
+    expect(
+      paneAnswerResponse("w1:p1", {
+        uuid: "turn-2",
+        ts: "2026-08-30T01:02:03Z",
+        text: "completed",
+        truncated: false,
+      }),
+    ).toEqual({
+      paneId: "w1:p1",
+      available: true,
+      uuid: "turn-2",
+      ts: "2026-08-30T01:02:03Z",
+      text: "completed",
+      truncated: false,
+    });
+  });
+});
 
 describe("historyParams — transcript paging params", () => {
   const params = (qs: string) => historyParams(new URL(`http://x/api/pane/w1:p1/history${qs}`));
@@ -705,6 +735,49 @@ describe("historyParams — transcript paging params", () => {
   });
 });
 
+describe("previewScrubFor — privacy downgrade matrix", () => {
+  test.each([
+    ["hidden", "hidden", null],
+    ["hidden", "blocked", null],
+    ["hidden", "all", null],
+    ["blocked", "hidden", "all"],
+    ["blocked", "blocked", null],
+    ["blocked", "all", null],
+    ["all", "hidden", "all"],
+    ["all", "blocked", "done"],
+    ["all", "all", null],
+  ] as const)("%s -> %s scrubs %s", (before, next, expected) => {
+    expect(previewScrubFor(before, next)).toBe(expected);
+  });
+});
+describe("parseNotifyPrefsPatch — notification preference validation", () => {
+  test("accepts each supported enum member", () => {
+    expect(parseNotifyPrefsPatch({ preview: "hidden" })).toEqual({ preview: "hidden" });
+    expect(parseNotifyPrefsPatch({ preview: "blocked" })).toEqual({ preview: "blocked" });
+    expect(parseNotifyPrefsPatch({ preview: "all" })).toEqual({ preview: "all" });
+    expect(parseNotifyPrefsPatch({ mode: "summary" })).toEqual({ mode: "summary" });
+    expect(parseNotifyPrefsPatch({ mode: "per-task" })).toEqual({ mode: "per-task" });
+    expect(parseNotifyPrefsPatch({ layout: "task-first" })).toEqual({ layout: "task-first" });
+    expect(parseNotifyPrefsPatch({ layout: "context-first" })).toEqual({ layout: "context-first" });
+    expect(parseNotifyPrefsPatch({ layout: "compact" })).toEqual({ layout: "compact" });
+  });
+
+  test.each([
+    ["preview", "private"],
+    ["mode", "digest"],
+    ["layout", "wide"],
+  ])("rejects an unsupported %s enum value", (key, value) => {
+    expect(parseNotifyPrefsPatch({ [key]: value })).toBeNull();
+  });
+
+  test("keeps boolean patches and ignores unknown keys", () => {
+    expect(parseNotifyPrefsPatch({ blocked: false, done: true, updates: false, unknown: "ignored" })).toEqual({
+      blocked: false,
+      done: true,
+      updates: false,
+    });
+  });
+});
 describe("deviceAuth — per-device authorisation", () => {
   const HDR = "x-device-id";
 
@@ -1006,6 +1079,10 @@ describe("marksPaneSeen — CSRF guard on marking a pane seen", () => {
   test("history is a read — it needs the header too", () => {
     expect(marksPaneSeen(withHeader(), "history")).toBe(false);
     expect(marksPaneSeen(withHeader({ [SEEN_HEADER]: "1" }), "history")).toBe(true);
+  });
+  test("answer is a read — it needs the header too", () => {
+    expect(marksPaneSeen(withHeader(), "answer")).toBe(false);
+    expect(marksPaneSeen(withHeader({ [SEEN_HEADER]: "1" }), "answer")).toBe(true);
   });
 
   test("write actions count without it — they already cleared the Origin-requiring write gate", () => {

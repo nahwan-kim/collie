@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Bell, Loader2 } from "lucide-react";
+import { ArrowLeft, Bell, ChevronRight, History, Loader2 } from "lucide-react";
 import { useNavigate, useRouteLoaderData } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { UpdateBanner } from "@/components/update-banner";
 import { ConnectionInfo } from "@/components/connection-info";
 import { Card } from "@/components/ui/card";
 import { NotifyPrefsControl } from "@/components/notify-prefs-control";
+import { NotifyDeliveryControl } from "@/components/notify-delivery-control";
 import { SnoozeControl } from "@/components/snooze-control";
 import { ThemeControl } from "@/components/theme-control";
 import { HapticsControl } from "@/components/haptics-control";
@@ -16,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { fetchConfig } from "@/lib/api";
 import { usePushControl } from "@/hooks/use-push";
 import { ROOT_ROUTE_ID, type HomeData } from "@/lib/loaders";
-import { homePath } from "@/lib/nav";
+import { homePath, notificationHistoryPath } from "@/lib/nav";
 import { useSession } from "@/lib/session";
 import type { PushAvailability } from "@/lib/push";
 
@@ -121,12 +122,26 @@ export function SettingsRoute() {
 
         {/* Mounted while push state is still UNKNOWN, and only removed once we positively learn the
             bridge has no VAPID keys. Gating on `state` truthiness instead inserted ~400px into the
-            middle of the page one frame late, shoving everything below it down. These two are
-            bridge-wide settings — which transitions notify, and quiet hours — so they are meaningful
+            middle of the page one frame late, shoving everything below it down. These controls are
+            bridge-wide settings — content, delivery, history, and quiet hours — so they are meaningful
             whatever this particular device's push status turns out to be. */}
         {state?.availability !== "server-off" && (
           <>
             <NotifyPrefsControl />
+            <NotifyDeliveryControl />
+            <Card className="gap-0 py-0">
+              <button
+                type="button"
+                onClick={() => navigate(notificationHistoryPath(session))}
+                className="flex min-h-11 w-full items-center justify-between gap-4 rounded-xl p-4 text-left transition-colors active:bg-muted/60"
+              >
+                <span className="flex min-w-0 items-center gap-3">
+                  <History className="size-5 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="font-medium">Recent notifications</span>
+                </span>
+                <ChevronRight className="size-5 shrink-0 text-muted-foreground" aria-hidden />
+              </button>
+            </Card>
             <SnoozeControl snoozedUntil={root?.snoozedUntil ?? null} />
           </>
         )}

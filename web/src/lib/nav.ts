@@ -30,3 +30,7 @@ export function homePath(session?: string): string {
 export function settingsPath(session?: string): string {
   return `/settings${sessionSearch(session)}`;
 }
+/** The persisted notification history route, carrying the current session when named. */
+export function notificationHistoryPath(session?: string): string {
+  return `/settings/notifications${sessionSearch(session)}`;
+}

@@ -3,7 +3,7 @@ import { precacheAndRoute, createHandlerBoundToURL } from "workbox-precaching";
 import { NavigationRoute, registerRoute } from "workbox-routing";
 import { clientsClaim } from "workbox-core";
 
-import { decidePush, type PushPayload } from "./lib/push-decision";
+import { decidePush, type PushPayload, visibleClientCoversPush } from "./lib/push-decision";
 import { FONT_URLS, NAVIGATION_NETWORK_ONLY } from "./lib/sw-routes";
 
 // Custom service worker (vite-plugin-pwa `injectManifest`). It does everything the old generated
@@ -100,9 +100,19 @@ self.addEventListener("push", (event: PushEvent) => {
   event.waitUntil(handlePush(event));
 });
 
-async function anyVisibleClient(): Promise<boolean> {
-  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  return windows.some((c) => c.visibilityState === "visible");
+async function hasVisibleClient(payload: PushPayload): Promise<boolean> {
+  // The default excludes stale, uncontrolled windows. Every returned WindowClient is controlled, so
+  // the explicit `true` keeps that fact visible at the pure decision boundary.
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: false });
+  return windows.some((client) =>
+    visibleClientCoversPush(
+      payload,
+      client.url,
+      client.visibilityState,
+      true,
+      self.location.origin,
+    ),
+  );
 }
 
 async function handlePush(event: PushEvent): Promise<void> {
@@ -114,23 +124,35 @@ async function handlePush(event: PushEvent): Promise<void> {
     payload = { body: event.data?.text() };
   }
 
-  const decision = decidePush(payload, await anyVisibleClient());
-  if (decision.kind === "suppress") return; // a visible Collie tab already surfaces it in-app
-  if (decision.kind === "clear") {
-    // Retraction: close the slot and show nothing. Chrome's silent-push budget tolerates this.
+  // Retractions are independent of client visibility: do not scan windows before closing the slot.
+  if (payload.type === "clear") {
+    const decision = decidePush(payload, false);
+    if (decision.kind !== "clear") return;
     const stale = await self.registration.getNotifications({ tag: decision.tag });
     for (const n of stale) n.close();
     return;
   }
-  // `renotify` isn't in this TS lib's NotificationOptions yet, though it's honoured by browsers that
-  // support it (and it needs a tag).
-  const options: NotificationOptions & { renotify?: boolean } = {
+
+  const decision = decidePush(payload, await hasVisibleClient(payload));
+  if (decision.kind === "suppress") return; // a visible Collie tab already surfaces it in-app
+  if (decision.kind === "clear") return;
+  // `renotify` and `vibrate` aren't in this TS lib's NotificationOptions yet, though they're
+  // honoured by browsers that support them (and `vibrate` is supplied by the bridge policy).
+  type CollieNotificationOptions = NotificationOptions & {
+    renotify?: boolean;
+    vibrate?: number[];
+  };
+  const options: CollieNotificationOptions = {
     body: decision.body,
     data: { paneId: decision.paneId, session: decision.session, target: decision.target },
     icon: ICON,
     badge: ICON,
     tag: decision.tag,
     renotify: decision.renotify,
+    silent: decision.silent,
+    ...(decision.silent !== true && decision.vibrate?.length
+      ? { vibrate: decision.vibrate }
+      : {}),
   };
   await self.registration.showNotification(decision.title, options);
 }

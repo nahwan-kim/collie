@@ -2,6 +2,9 @@ import { http, HttpResponse } from "msw";
 
 import type {
   AgentView,
+  NotificationHistoryEntry,
+  NotifyPrefs,
+  PaneAnswerResponse,
   SessionSummary,
   SnapshotResponse,
   TabView,
@@ -113,6 +116,46 @@ export const fixtureTranscript: TranscriptEntry[] = [
     ],
   },
 ];
+export const fixtureNotifyPrefs: NotifyPrefs = {
+  blocked: true,
+  done: false,
+  updates: true,
+  preview: "hidden",
+  mode: "summary",
+  layout: "task-first",
+};
+
+export const fixturePaneAnswer: PaneAnswerResponse = {
+  paneId: "w1:p1",
+  available: true,
+  uuid: "t2",
+  ts: "2026-07-25T06:22:24.093Z",
+  text: "One commit: abc1234.",
+  truncated: false,
+};
+
+export const fixtureNotificationHistory: NotificationHistoryEntry[] = [
+  {
+    id: "notification-primary",
+    timestamp: 2,
+    paneId: "w1:p1",
+    status: "blocked",
+    work: "what changed today?",
+    context: "webapp",
+    preview: "Choose how to continue",
+  },
+  {
+    id: "notification-demo",
+    timestamp: 1,
+    session: "collie-demo",
+    paneId: "w2:p1",
+    status: "done",
+    work: "Review notification changes",
+    context: "collie",
+    preview: "One commit: abc1234.",
+    resolvedAt: 3,
+  },
+];
 
 // ── The fake pane's input box ────────────────────────────────────────────────────────────────────
 // A guarded reply (lib/reply-action.ts) types with submit:false and then polls pane reads until the
@@ -147,6 +190,7 @@ export const handlers = [
   http.get(/\/api\/pane\/[^/]+$/, () =>
     HttpResponse.json({ paneId: "w1:p1", text: paneTextWithDraft(), truncated: false, revision: 1 }),
   ),
+  http.get(/\/api\/pane\/[^/]+\/answer$/, () => HttpResponse.json(fixturePaneAnswer)),
   // Pane transcript history. Two turns, newest-anchored, with nothing older behind them.
   http.get(/\/api\/pane\/[^/]+\/history/, () =>
     HttpResponse.json({
@@ -194,12 +238,14 @@ export const handlers = [
     const { snoozedUntil } = (await request.json()) as { snoozedUntil: number | null };
     return HttpResponse.json({ snoozedUntil });
   }),
-  http.get("/api/notifications/prefs", () =>
-    HttpResponse.json({ blocked: true, done: false, updates: true }),
+  http.get("/api/notifications/history", () =>
+    HttpResponse.json({ entries: fixtureNotificationHistory }),
   ),
+  http.delete("/api/notifications/history", () => new HttpResponse(null, { status: 204 })),
+  http.get("/api/notifications/prefs", () => HttpResponse.json(fixtureNotifyPrefs)),
   http.post("/api/notifications/prefs", async ({ request }) => {
-    const patch = (await request.json()) as Record<string, boolean>;
-    return HttpResponse.json({ blocked: true, done: false, updates: true, ...patch });
+    const patch = (await request.json()) as Partial<NotifyPrefs>;
+    return HttpResponse.json({ ...fixtureNotifyPrefs, ...patch });
   }),
   http.post("/api/update/check", () =>
     HttpResponse.json({

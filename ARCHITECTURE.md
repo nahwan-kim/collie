@@ -119,13 +119,24 @@ Product details that shaped the loop:
   `pane.rename` / `pane.close` writes the security posture already covers
   (`web/src/components/pane-actions-sheet.tsx`).
 
-**Known gap — the notification body doesn't carry the question.** The design called for putting the
-agent's question *in* the notification, so a tap is actionable even before the app loads (§7 explains
-why that matters on Android). What ships identifies **which work item** needs you — title `Needs you:
-<work>` / `Done: <work>`, body `<agent> · <workspace> [· <tab>]` (`bridge/notifications.ts`) — and you
-read the question in the app. Work naming prefers an explicit pane label, then its live terminal title,
-then its session name. Closing the remaining gap needs the server-side blocking-message capture
-described above.
+**Notification content is explicit policy, not an accidental payload.** The bridge reads the existing
+agent journal through the same contained adapters used by conversation history. It can select a
+blocked `AskUserQuestion` question/options summary or the latest assistant text for a done result; it
+never copies user, thinking, tool-result, summary, note, or filesystem/session-reference content. The
+safe `hidden` default preserves the original `Needs you: <work>` / `Done: <work>` plus compact context.
+`blocked` permits question previews and `all` also permits result previews. Preview text is
+control/bidi-stripped, single-line, and transport-bounded before Web Push. The same policy gates the
+owner-only, 100-row notification history; lowering privacy scrubs disallowed persisted previews.
+
+Delivery remains lifecycle-driven. `summary` keeps the historical herd slot while named sessions get
+distinct hashed RFC 8030 collapse topics; `per-task` uses stable pane tags and session-scoped topics so
+unrelated work cannot replace another alert offline. A visible browser suppresses a push only for the
+same Herdr session. Mode changes, preference changes, snooze, pane removal, and session disposal
+retract every old slot; shutdown flushes those retractions, and startup uses recent history rows to
+clear slots left by a prior crash, including rows resolved just before an interrupted retraction. Mixed summaries name blocked and done counts. Blocked/mixed alerts
+are high-urgency with sound/vibration, while done-only alerts are normal-urgency and silent with no
+vibration option. Three bounded layouts are supported; there is no free-form notification template
+engine (`bridge/notifications.ts`, `bridge/notify-history.ts`).
 
 ## 5. Architecture notes
 
@@ -274,9 +285,9 @@ defeat the purpose. **Never use `tailscale funnel`** (public exposure).
 - Install as a PWA (Add to Home Screen) → app icon, instant open, persistent.
 - Known failure mode (accept, don't engineer around): if `tailscaled` is down, the bridge is reachable
   on localhost but not via MagicDNS. On **Android specifically**, the OS backgrounds Tailscale
-  aggressively — a notification tap may hit the app before the tunnel is up, and you wait. The
-  intended mitigation (the agent's question in the notification body, so the tap is at least
-  informative) is the gap noted at the end of §4.
+  aggressively — a notification tap may hit the app before the tunnel is up, and you wait. When the
+  operator enables question/answer previews, the encrypted push still puts the useful one-line content
+  on the lock screen before that navigation; the default remains work-only to avoid surprise exposure.
 
 ## 8. Future ideas
 

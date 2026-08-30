@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import type { AgentStatus } from "./types.ts";
@@ -11,6 +11,10 @@ import type { AgentStatus } from "./types.ts";
 // that backend changes require. Missing file / missing keys fall back to defaults.
 
 /** Notification type preferences: which notifiable statuses actually push. */
+export type NotifyPreview = "hidden" | "blocked" | "all";
+export type NotifyMode = "summary" | "per-task";
+export type NotifyLayout = "task-first" | "context-first" | "compact";
+
 export interface NotifyPrefs {
   /** Push when an agent becomes blocked (waiting on your input). Default on. */
   blocked: boolean;
@@ -20,13 +24,42 @@ export interface NotifyPrefs {
    *  which otherwise bypass snooze (an update isn't quiet-hours material). Not an agent status, so it
    *  never flows through {@link isNotifiable}; the update monitor reads it directly. */
   updates: boolean;
+  /** How much assistant conversation content a push may include. Default hidden. */
+  preview: NotifyPreview;
+  /** Whether notifications are one herd summary or one row per task. Default summary. */
+  mode: NotifyMode;
+  /** Ordering of task and context fields in rendered notifications. Default task-first. */
+  layout: NotifyLayout;
 }
 
-export const DEFAULT_NOTIFY_PREFS: NotifyPrefs = { blocked: true, done: false, updates: true };
+const PREVIEW_VALUES = ["hidden", "blocked", "all"] as const;
+const MODE_VALUES = ["summary", "per-task"] as const;
+const LAYOUT_VALUES = ["task-first", "context-first", "compact"] as const;
+
+function isNotifyPreview(value: unknown): value is NotifyPreview {
+  return typeof value === "string" && PREVIEW_VALUES.includes(value as NotifyPreview);
+}
+
+function isNotifyMode(value: unknown): value is NotifyMode {
+  return typeof value === "string" && MODE_VALUES.includes(value as NotifyMode);
+}
+
+function isNotifyLayout(value: unknown): value is NotifyLayout {
+  return typeof value === "string" && LAYOUT_VALUES.includes(value as NotifyLayout);
+}
+
+export const DEFAULT_NOTIFY_PREFS: NotifyPrefs = {
+  blocked: true,
+  done: false,
+  updates: true,
+  preview: "hidden",
+  mode: "summary",
+  layout: "task-first",
+};
 
 /**
- * Coerce an untrusted parsed value into a {@link NotifyPrefs}, filling any missing or non-boolean key
- * from the defaults. Pure + exported so the file-shape handling is unit-testable.
+ * Coerce an untrusted parsed value into a {@link NotifyPrefs}, filling any missing, non-boolean, or
+ * invalid enum key from the defaults. Pure + exported so the file-shape handling is unit-testable.
  */
 export function coerceNotifyPrefs(raw: unknown): NotifyPrefs {
   const o = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
@@ -34,22 +67,28 @@ export function coerceNotifyPrefs(raw: unknown): NotifyPrefs {
     blocked: typeof o.blocked === "boolean" ? o.blocked : DEFAULT_NOTIFY_PREFS.blocked,
     done: typeof o.done === "boolean" ? o.done : DEFAULT_NOTIFY_PREFS.done,
     updates: typeof o.updates === "boolean" ? o.updates : DEFAULT_NOTIFY_PREFS.updates,
+    preview: isNotifyPreview(o.preview) ? o.preview : DEFAULT_NOTIFY_PREFS.preview,
+    mode: isNotifyMode(o.mode) ? o.mode : DEFAULT_NOTIFY_PREFS.mode,
+    layout: isNotifyLayout(o.layout) ? o.layout : DEFAULT_NOTIFY_PREFS.layout,
   };
 }
 
 export class NotifyPrefsStore {
   private prefs: NotifyPrefs = { ...DEFAULT_NOTIFY_PREFS };
   private readonly file: string;
+  private writing: Promise<void> = Promise.resolve();
 
   constructor(private readonly cfg: Config) {
     this.file = join(cfg.stateDir, "notify-prefs.json");
   }
 
   async load(): Promise<void> {
+    await this.writing.catch(() => {});
+    this.prefs = { ...DEFAULT_NOTIFY_PREFS };
     try {
       this.prefs = coerceNotifyPrefs(await Bun.file(this.file).json());
     } catch {
-      /* none saved yet — keep defaults */
+      /* none saved yet, or unreadable — keep defaults */
     }
   }
 
@@ -68,20 +107,34 @@ export class NotifyPrefsStore {
     return false;
   }
 
-  /** Merge a partial patch (only booleans are applied), persist, and return the updated prefs. */
+  /** Merge a partial patch (only typed values are applied), persist, and return the updated prefs. */
   async set(patch: Partial<NotifyPrefs>): Promise<NotifyPrefs> {
-    if (typeof patch.blocked === "boolean") this.prefs.blocked = patch.blocked;
-    if (typeof patch.done === "boolean") this.prefs.done = patch.done;
-    if (typeof patch.updates === "boolean") this.prefs.updates = patch.updates;
+    const o =
+      typeof patch === "object" && patch !== null
+        ? (patch as Record<string, unknown>)
+        : {};
+    if (typeof o.blocked === "boolean") this.prefs.blocked = o.blocked;
+    if (typeof o.done === "boolean") this.prefs.done = o.done;
+    if (typeof o.updates === "boolean") this.prefs.updates = o.updates;
+    if (isNotifyPreview(o.preview)) this.prefs.preview = o.preview;
+    if (isNotifyMode(o.mode)) this.prefs.mode = o.mode;
+    if (isNotifyLayout(o.layout)) this.prefs.layout = o.layout;
     await this.save();
     return this.current();
   }
 
   /** Atomic, owner-only write: fresh temp file (mode 0600) then rename over the target. */
-  private async save(): Promise<void> {
-    await mkdir(this.cfg.stateDir, { recursive: true, mode: 0o700 });
-    const tmp = `${this.file}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.prefs, null, 2), { mode: 0o600 });
-    await rename(tmp, this.file);
+  private save(): Promise<void> {
+    const payload = JSON.stringify(this.prefs, null, 2);
+    const next = this.writing.catch(() => {}).then(async () => {
+      await mkdir(this.cfg.stateDir, { recursive: true, mode: 0o700 });
+      await chmod(this.cfg.stateDir, 0o700);
+      const tmp = `${this.file}.tmp`;
+      await writeFile(tmp, payload, { mode: 0o600 });
+      await chmod(tmp, 0o600);
+      await rename(tmp, this.file);
+    });
+    this.writing = next;
+    return next;
   }
 }

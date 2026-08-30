@@ -8,7 +8,9 @@ import type {
   ActionResponse,
   BridgeConfig,
   CreateResponse,
+  NotificationHistoryResponse,
   NotifyPrefs,
+  PaneAnswerResponse,
   PaneHistoryResponse,
   PaneReadResponse,
   SnapshotResponse,
@@ -321,6 +323,30 @@ export function fetchHistory(
     signal,
     headers: { "x-collie-seen": "1" },
   });
+}
+/** Fetch the latest assistant answer for a pane, when its journal can provide one. */
+export function fetchLatestAnswer(
+  paneId: string,
+  session?: string,
+  signal?: AbortSignal,
+): Promise<PaneAnswerResponse> {
+  return req<PaneAnswerResponse>(
+    withSession(`/api/pane/${encodeURIComponent(paneId)}/answer`, session),
+    {
+      signal,
+      headers: { "x-collie-seen": "1" },
+    },
+  );
+}
+
+/** Fetch persisted notification history across all sessions, newest-first. */
+export function fetchNotificationHistory(signal?: AbortSignal): Promise<NotificationHistoryResponse> {
+  return req<NotificationHistoryResponse>("/api/notifications/history", { signal });
+}
+
+/** Clear all persisted notification history. */
+export function clearNotificationHistory(): Promise<void> {
+  return req<void>("/api/notifications/history", { method: "DELETE" });
 }
 
 export function sendReply(

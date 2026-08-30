@@ -25,11 +25,12 @@ public access, Collie isn't built for it. Read the
 
 - **React Router + Vite** — TypeScript, Tailwind, shadcn, and a Bun bridge
 - **A dashboard ranked by who needs you**, not by what changed last
-- **Push notifications** the moment an agent is waiting on you
+- **Push notifications** the moment an agent is waiting on you, with privacy-controlled previews
 - **Quick actions and slash commands** per agent — tap, don't type
 - **Special-keys pad** — `Esc`, `Ctrl+C`, arrows, combinable modifiers
 - **Find in output**, and **conversation history** the terminal can't scroll back to
 - **Send an image** from your camera roll
+- **Copy the latest assistant answer** to your phone clipboard with one tap
 - **Switch between Herdr sessions** without touching the host
 - **Installs to your home screen** (PWA) and runs entirely on your own machine — loopback bind, no
   cloud, no account
@@ -623,8 +624,14 @@ default `tailscale serve` (Tailscale manages the MagicDNS cert; nothing to obtai
 terminates TLS. Plain-HTTP modes (`COLLIE_SERVE_MODE=http`) are **not** a secure context, so the
 browser won't even offer the subscribe button — Settings flags it `insecure`.
 
-Collie pushes when an agent goes **blocked** or **done**, with the agent's message in the body;
-**tapping it opens Collie at that agent**.
+Collie pushes when an agent goes **blocked** or **done**; **tapping it opens Collie at that
+agent**. The safe default shows only work and context. In **Settings → Notification delivery**, choose
+whether lock screens may also show blocked questions or completed answers, switch between one herd
+summary and separate task notifications, and select a tested task-first, context-first, or compact
+layout. Blocked/mixed alerts stay high-urgency with sound and vibration; done-only alerts are quiet and
+normal-urgency. **Recent notifications** keeps a private, bounded history on the bridge and supports
+deep links and two-tap clearing. Lowering the privacy level removes now-disallowed previews from that
+history.
 
 ## Troubleshooting
 

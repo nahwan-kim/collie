@@ -61,19 +61,161 @@ export function summarizeToolInput(input: unknown): string {
   // what you actually searched for, so `pattern` MUST outrank the bare `path` (a test pins this). A
   // subagent call carries both `description`/`task` and `prompt`, and the short one is already the
   // one-line form.
-  const chosen =
-    pick(
-      "file_path",
-      "command",
-      "pattern",
-      "query",
-      "url",
-      "path",
-      "description",
-      "task",
-      "prompt",
-    ) ??
-    // Unknown tool: first string value wins, so the line is never empty for no reason.
-    Object.values(o).find((v): v is string => typeof v === "string" && v.trim() !== "");
-  return chosen === undefined ? "" : oneLine(chosen);
+  const chosen = pick(
+    "file_path",
+    "command",
+    "pattern",
+    "query",
+    "url",
+    "path",
+    "description",
+    "task",
+    "prompt",
+  );
+  if (chosen !== undefined) return oneLine(chosen);
+
+  const questions = summarizeAskUserQuestions(o.questions);
+  if (questions !== "") return oneLine(questions);
+
+  // Unknown tool: first string value wins, so the line is never empty for no reason.
+  const fallback = Object.values(o).find(
+    (v): v is string => typeof v === "string" && v.trim() !== "",
+  );
+  return fallback === undefined ? "" : oneLine(fallback);
+}
+
+const MAX_ASK_QUESTIONS = 4;
+const MAX_ASK_OPTIONS = 6;
+const MAX_ASK_ITEMS_INSPECTED = 32;
+const MAX_ASK_OPTIONS_INSPECTED = 24;
+
+function boundedSummaryPart(value: string): { text: string; truncated: boolean } {
+  let text = "";
+  let pendingSpace = false;
+  for (const character of value) {
+    if (/\s/u.test(character)) {
+      if (text !== "") pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace) {
+      if (text.length + 1 > MAX_SUMMARY_CHARS) return { text, truncated: true };
+      text += " ";
+      pendingSpace = false;
+    }
+    if (text.length + character.length > MAX_SUMMARY_CHARS) return { text, truncated: true };
+    text += character;
+  }
+  return { text, truncated: false };
+}
+
+function summarizeAskUserQuestions(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+
+  let summary = "";
+  let questionCount = 0;
+  let omitted = false;
+  let markerAdded = false;
+  let stop = false;
+  let inspectedQuestions = 0;
+
+  const append = (fragment: string): boolean => {
+    const remaining = MAX_SUMMARY_CHARS - summary.length;
+    if (remaining <= 0) {
+      omitted = true;
+      return false;
+    }
+    if (fragment.length <= remaining) {
+      summary += fragment;
+      return true;
+    }
+    summary += fragment.slice(0, remaining);
+    omitted = true;
+    return false;
+  };
+  const appendMarker = (fragment: string): void => {
+    if (append(fragment)) markerAdded = true;
+  };
+
+  for (const item of value) {
+    inspectedQuestions++;
+    if (inspectedQuestions > MAX_ASK_ITEMS_INSPECTED) {
+      omitted = true;
+      appendMarker(summary === "" ? "…" : "; …");
+      break;
+    }
+    if (item === null || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const question = record.question;
+    if (typeof question !== "string") continue;
+    const questionPart = boundedSummaryPart(question);
+    if (questionPart.text === "") continue;
+    if (questionCount >= MAX_ASK_QUESTIONS) {
+      omitted = true;
+      appendMarker(summary === "" ? "…" : "; …");
+      break;
+    }
+
+    const prefix = summary === "" ? "" : "; ";
+    if (!append(`${prefix}${questionPart.text}`)) {
+      stop = true;
+      break;
+    }
+    questionCount++;
+    if (questionPart.truncated) {
+      omitted = true;
+      break;
+    }
+
+    const optionsValue = record.options;
+    if (!Array.isArray(optionsValue)) continue;
+    let labelCount = 0;
+    let omittedLabels = false;
+    let hasLabels = false;
+    let inspectedOptions = 0;
+    for (const option of optionsValue) {
+      inspectedOptions++;
+      if (inspectedOptions > MAX_ASK_OPTIONS_INSPECTED) {
+        omittedLabels = true;
+        break;
+      }
+      if (option === null || typeof option !== "object") continue;
+      const label = (option as Record<string, unknown>).label;
+      if (typeof label !== "string") continue;
+      const labelPart = boundedSummaryPart(label);
+      if (labelPart.text === "") continue;
+      if (labelCount >= MAX_ASK_OPTIONS) {
+        omittedLabels = true;
+        break;
+      }
+      if (!hasLabels) {
+        if (!append(" (")) {
+          stop = true;
+          break;
+        }
+        hasLabels = true;
+      } else if (!append(", ")) {
+        stop = true;
+        break;
+      }
+      if (!append(labelPart.text)) {
+        stop = true;
+        break;
+      }
+      labelCount++;
+      if (labelPart.truncated) {
+        omitted = true;
+        stop = true;
+        break;
+      }
+    }
+    if (stop) break;
+    if (hasLabels) {
+      if (omittedLabels) appendMarker(", …)");
+      else if (!append(")")) break;
+    }
+  }
+
+  if (summary === "") return "";
+  if (omitted && !markerAdded) summary += "…";
+  return summary;
 }

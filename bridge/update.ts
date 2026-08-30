@@ -266,6 +266,11 @@ export class UpdateMonitor {
     return this.inFlight;
   }
 
+  /** Wait for the deduplicated release check that was already running when shutdown began. */
+  async flush(): Promise<void> {
+    await this.inFlight;
+  }
+
   /**
    * One release-check cycle: fetch tags, recompute `latest`, and fire an at-most-once push for a new
    * version. Fail-soft — a fetch error keeps the previous `latest`/`checkedAt`. The push is gated on

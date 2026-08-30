@@ -21,27 +21,71 @@ afterAll(async () => {
 });
 
 describe("coerceNotifyPrefs", () => {
-  test("fills missing / non-boolean keys from defaults", () => {
-    expect(coerceNotifyPrefs(undefined)).toEqual({ blocked: true, done: false, updates: true });
-    expect(coerceNotifyPrefs(null)).toEqual({ blocked: true, done: false, updates: true });
-    expect(coerceNotifyPrefs({})).toEqual({ blocked: true, done: false, updates: true });
-    expect(coerceNotifyPrefs({ blocked: false })).toEqual({ blocked: false, done: false, updates: true });
-    expect(coerceNotifyPrefs({ done: true })).toEqual({ blocked: true, done: true, updates: true });
-    // `updates` is a first-class key: an explicit false sticks, non-booleans fall back to the default.
-    expect(coerceNotifyPrefs({ updates: false })).toEqual({ blocked: true, done: false, updates: false });
-    expect(coerceNotifyPrefs({ blocked: "yes", done: 1, updates: 0 })).toEqual({
+  test("fills missing, non-boolean, and invalid enum keys from defaults", () => {
+    expect(coerceNotifyPrefs(undefined)).toEqual({
       blocked: true,
       done: false,
       updates: true,
+      preview: "hidden",
+      mode: "summary",
+      layout: "task-first",
     });
+    expect(coerceNotifyPrefs(null)).toEqual(DEFAULT_NOTIFY_PREFS);
+    expect(coerceNotifyPrefs({})).toEqual(DEFAULT_NOTIFY_PREFS);
+    expect(coerceNotifyPrefs({ blocked: false })).toEqual({
+      ...DEFAULT_NOTIFY_PREFS,
+      blocked: false,
+    });
+    expect(coerceNotifyPrefs({ done: true })).toEqual({
+      ...DEFAULT_NOTIFY_PREFS,
+      done: true,
+    });
+    // `updates` is a first-class key: an explicit false sticks, non-booleans fall back to the default.
+    expect(coerceNotifyPrefs({ updates: false })).toEqual({
+      ...DEFAULT_NOTIFY_PREFS,
+      updates: false,
+    });
+    expect(coerceNotifyPrefs({ blocked: "yes", done: 1, updates: 0 })).toEqual(DEFAULT_NOTIFY_PREFS);
+  });
+
+  test("accepts every supported enum value", () => {
+    expect(
+      coerceNotifyPrefs({
+        preview: "all",
+        mode: "per-task",
+        layout: "context-first",
+      }),
+    ).toEqual({
+      ...DEFAULT_NOTIFY_PREFS,
+      preview: "all",
+      mode: "per-task",
+      layout: "context-first",
+    });
+  });
+
+  test("replaces invalid enum values with safe defaults", () => {
+    expect(
+      coerceNotifyPrefs({
+        preview: "full",
+        mode: "per_task",
+        layout: "wide",
+      }),
+    ).toEqual(DEFAULT_NOTIFY_PREFS);
   });
 });
 
 describe("NotifyPrefsStore", () => {
-  test("defaults to blocked-on / done-off when nothing is saved", async () => {
+  test("defaults to blocked-on / done-off with hidden summary task-first", async () => {
     const store = new NotifyPrefsStore(await tempCfg());
     await store.load();
-    expect(store.current()).toEqual(DEFAULT_NOTIFY_PREFS);
+    expect(store.current()).toEqual({
+      blocked: true,
+      done: false,
+      updates: true,
+      preview: "hidden",
+      mode: "summary",
+      layout: "task-first",
+    });
   });
 
   test("isNotifiable follows the current prefs; other statuses are never notifiable", async () => {
@@ -58,13 +102,36 @@ describe("NotifyPrefsStore", () => {
   test("set merges a partial patch, persists, and returns the updated prefs", async () => {
     const cfg = await tempCfg();
     const store = new NotifyPrefsStore(cfg);
-    const updated = await store.set({ done: true, updates: false });
-    expect(updated).toEqual({ blocked: true, done: true, updates: false });
+    const updated = await store.set({
+      done: true,
+      updates: false,
+      preview: "blocked",
+      mode: "per-task",
+      layout: "compact",
+    });
+    expect(updated).toEqual({
+      blocked: true,
+      done: true,
+      updates: false,
+      preview: "blocked",
+      mode: "per-task",
+      layout: "compact",
+    });
 
     // Round-trips through disk: a fresh store reloads the same values (survives a restart).
     const reloaded = new NotifyPrefsStore(cfg);
     await reloaded.load();
-    expect(reloaded.current()).toEqual({ blocked: true, done: true, updates: false });
+    expect(reloaded.current()).toEqual(updated);
+  });
+
+  test("set ignores invalid enum values at runtime", async () => {
+    const store = new NotifyPrefsStore(await tempCfg());
+    const updated = await store.set({
+      preview: "full" as never,
+      mode: "per_task" as never,
+      layout: "wide" as never,
+    });
+    expect(updated).toEqual(DEFAULT_NOTIFY_PREFS);
   });
 
   test("current() returns a copy — callers can't mutate the store's state", async () => {
@@ -88,7 +155,7 @@ describe("NotifyPrefsStore", () => {
     await writeFile(join(cfg.stateDir, "notify-prefs.json"), JSON.stringify({ blocked: false }));
     const store = new NotifyPrefsStore(cfg);
     await store.load();
-    expect(store.current()).toEqual({ blocked: false, done: false, updates: true });
+    expect(store.current()).toEqual({ ...DEFAULT_NOTIFY_PREFS, blocked: false });
   });
 
   test("load tolerates a missing file (keeps defaults)", async () => {

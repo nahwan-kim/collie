@@ -1,4 +1,4 @@
-import { homePath, panePath } from "./nav";
+import { homePath, notificationHistoryPath, panePath } from "./nav";
 
 describe("panePath", () => {
   it("URL-encodes the colon in a pane id", () => {
@@ -35,5 +35,16 @@ describe("homePath", () => {
 
   it("carries a named session as ?s=", () => {
     expect(homePath("collie-demo")).toBe("/?s=collie-demo");
+  });
+});
+describe("notificationHistoryPath", () => {
+  it("uses the primary settings notification route without a session query", () => {
+    expect(notificationHistoryPath()).toBe("/settings/notifications");
+  });
+
+  it("percent-encodes a named session exactly", () => {
+    expect(notificationHistoryPath("collie demo/qa")).toBe(
+      "/settings/notifications?s=collie%20demo%2Fqa",
+    );
   });
 });

@@ -4,16 +4,21 @@
 // client visibility, then perform the side effect this returns. Everything *decided* — suppress vs
 // show vs clear, tag derivation, title/renotify defaults — is plain data in, plain data out.
 
-// Payload shape is whatever bridge/push.ts sends: a render → { title, body, tag, renotify,
-// data: { paneId } }; a retraction → { type: "clear", tag }.
+// Payload shape is whatever bridge/push.ts sends: a render → { title, body, tag, renotify, silent,
+// vibrate, data: { paneId } }; an update is `{ type: "update", target: "settings" }`; a retraction
+// is `{ type: "clear", tag }`.
 export interface PushPayload {
-  type?: "clear";
+  type?: "clear" | "update";
   title?: string;
   body?: string;
   /** Notification slot. The bridge sends one shared "collie:herd" tag so the herd coalesces. */
   tag?: string;
   /** Re-alert when replacing the slot (a new agent arrived) vs. update it silently (a retraction). */
   renotify?: boolean;
+  /** Whether the notification should be quiet; status policy is decided by the bridge. */
+  silent?: boolean;
+  /** Optional vibration pattern; status policy is decided by the bridge. */
+  vibrate?: number[];
   /**
    * `session` is the registry name the pane lives in — carried so the click deep-links into it.
    * `target` names a non-pane destination for the tap (e.g. "settings" for an update notification);
@@ -39,6 +44,8 @@ export type PushDecision =
       /** Non-pane tap destination (e.g. "settings"); undefined = the default agent deep-link. */
       target?: string;
       renotify: boolean;
+      silent?: boolean;
+      vibrate?: number[];
     };
 
 // Notifications share a slot so a replacement updates rather than stacks. The bridge sets the tag
@@ -66,5 +73,71 @@ export function decidePush(payload: PushPayload, hasVisibleClient: boolean): Pus
     session,
     target,
     renotify: payload.renotify ?? false,
+    silent: payload.silent,
+    ...(Array.isArray(payload.vibrate) && payload.vibrate.length > 0
+      ? { vibrate: payload.vibrate }
+      : {}),
   };
+}
+function normalizeSession(session: string | null | undefined): string | undefined {
+  const normalized = session?.trim();
+  return normalized || undefined;
+}
+
+function colliePath(pathname: string): string | undefined {
+  const normalized = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  if (
+    normalized === "/" ||
+    normalized === "/index.html" ||
+    normalized === "/settings" ||
+    normalized === "/settings/notifications" ||
+    /^\/space\/[^/]+$/.test(normalized) ||
+    /^\/pane\/[^/]+(?:\/history)?$/.test(normalized)
+  ) {
+    return normalized;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a visible, controlled Collie client already covers a push.
+ *
+ * `appOrigin` is supplied by the service worker because a pure helper has no ambient origin. When it
+ * is omitted, only origin-relative URLs are accepted; this keeps standalone callers from treating an
+ * arbitrary absolute URL as same-origin. Agent pushes may be covered by any Collie route in the same
+ * session. Settings-targeted pushes require a Settings route, and no client covers a clear.
+ */
+export function visibleClientCoversPush(
+  payload: PushPayload,
+  clientUrl: string,
+  visibilityState: string,
+  controlled: boolean,
+  appOrigin?: string,
+): boolean {
+  if (payload.type === "clear" || visibilityState !== "visible" || !controlled) return false;
+
+  let url: URL;
+  try {
+    if (appOrigin === undefined) {
+      if (!clientUrl.startsWith("/")) return false;
+      url = new URL(clientUrl, "https://collie.invalid");
+      if (url.origin !== "https://collie.invalid") return false;
+    } else {
+      const origin = new URL(appOrigin).origin;
+      url = new URL(clientUrl, origin);
+      if (url.origin !== origin) return false;
+    }
+  } catch {
+    return false;
+  }
+
+  const path = colliePath(url.pathname);
+  if (path === undefined) return false;
+  if (normalizeSession(url.searchParams.get("s")) !== normalizeSession(payload.data?.session)) {
+    return false;
+  }
+  if (payload.data?.target === "settings") {
+    return path === "/settings" || path === "/settings/notifications";
+  }
+  return true;
 }

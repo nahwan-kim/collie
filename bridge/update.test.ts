@@ -233,6 +233,28 @@ describe("UpdateMonitor", () => {
     expect(notified).toEqual([]);
   });
 
+  it("flush waits for an in-flight release check and is a no-op when idle", async () => {
+    let release!: (tags: string[]) => void;
+    const { monitor } = makeMonitor({
+      fetchTags: () =>
+        new Promise<string[]>((resolve) => {
+          release = resolve;
+        }),
+    });
+
+    await monitor.flush();
+    void monitor.checkRelease();
+    let settled = false;
+    const flushing = monitor.flush().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release(["v0.12.0"]);
+    await flushing;
+    expect(settled).toBe(true);
+  });
+
   it("de-dupes concurrent checks — one fetch backs both callers, then the guard clears", async () => {
     let calls = 0;
     let release!: (tags: string[]) => void;

@@ -11,11 +11,25 @@ import { NotifyPrefsControl } from "@/components/notify-prefs-control";
 // merged prefs back; a failing POST must leave the switch where it started (revert).
 
 let lastPatch: Record<string, unknown> | undefined;
-let currentPrefs: { blocked: boolean; done: boolean; updates: boolean };
+let currentPrefs: {
+  blocked: boolean;
+  done: boolean;
+  updates: boolean;
+  preview: "hidden" | "blocked" | "all";
+  mode: "summary" | "per-task";
+  layout: "task-first" | "context-first" | "compact";
+};
 
 beforeEach(() => {
   lastPatch = undefined;
-  currentPrefs = { blocked: true, done: false, updates: true };
+  currentPrefs = {
+    blocked: true,
+    done: false,
+    updates: true,
+    preview: "hidden",
+    mode: "summary",
+    layout: "task-first",
+  };
   server.use(
     http.get("/api/notifications/prefs", () => HttpResponse.json(currentPrefs)),
     http.post("/api/notifications/prefs", async ({ request }) => {
@@ -35,6 +49,7 @@ describe("NotifyPrefsControl", () => {
     expect(needs).toBeChecked(); // blocked default on
     expect(finished).not.toBeChecked(); // done default off
     expect(updates).toBeChecked(); // updates default on
+    expect(screen.getAllByRole("switch")).toHaveLength(3);
   });
 
   test("toggling App updates POSTs the single-key partial update", async () => {

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Push, topicIsSendable } from "./push.ts";
+import { Push, paneTopicFor, summaryTopicFor, topicIsSendable } from "./push.ts";
 import type { PushSender, PushSubscription } from "./push.ts";
 import { loadConfig } from "./config.ts";
 
@@ -480,5 +480,171 @@ describe("Push — superseding, metadata and forget", () => {
     expect(await fileEndpoints(cfg.stateDir)).toEqual(["a"]);
     expect(await push.forget("*")).toBe(1);
     expect(await fileEndpoints(cfg.stateDir)).toEqual([]);
+  });
+});
+describe("Push — transport hints and pane topics", () => {
+  function capture() {
+    const seen: Array<{ payload: string; options: { TTL: number; topic: string; urgency?: string } }> = [];
+    const sender: PushSender = (_sub, payload, options) => {
+      seen.push({ payload, options });
+      return Promise.resolve();
+    };
+    return { seen, sender };
+  }
+
+  test("strips topic and urgency from the service-worker payload", async () => {
+    const cfg = await tempCfg();
+    const { seen, sender } = capture();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+
+    await push.send({
+      title: "Needs you",
+      body: "question",
+      tag: "collie:herd:p1",
+      paneId: "p1",
+      topic: paneTopicFor("session", "p1"),
+      urgency: "high",
+      silent: false,
+    });
+
+    const payload = JSON.parse(seen[0]!.payload) as Record<string, unknown>;
+    expect(payload.topic).toBeUndefined();
+    expect(payload.urgency).toBeUndefined();
+    expect(payload.silent).toBe(false);
+    expect(seen[0]!.options).toMatchObject({ urgency: "high" });
+    expect(seen[0]!.options.topic).toBe(paneTopicFor("session", "p1"));
+  });
+
+  test("clear forces high urgency and preserves a custom pane topic", async () => {
+    const cfg = await tempCfg();
+    const { seen, sender } = capture();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+    const topic = paneTopicFor(undefined, "arbitrary/ID");
+
+    await push.send({ type: "clear", tag: "collie:herd:arbitrary", topic, urgency: "normal" });
+
+    expect(seen[0]!.options).toMatchObject({ topic, urgency: "high" });
+    const payload = JSON.parse(seen[0]!.payload) as Record<string, unknown>;
+    expect(payload.topic).toBeUndefined();
+    expect(payload.urgency).toBeUndefined();
+  });
+
+  test("pane topics are deterministic, session-scoped, and sendable", () => {
+    const a = paneTopicFor(undefined, "pane/one");
+    expect(a).toBe(paneTopicFor(undefined, "pane/one"));
+    expect(a).not.toBe(paneTopicFor("other", "pane/one"));
+    expect(a).not.toBe(paneTopicFor(undefined, "pane/two"));
+    expect(a).toMatch(/^[A-Za-z0-9_-]{18}$/);
+    expect(topicIsSendable(a)).toBe(true);
+  });
+
+  test("invalid custom topics fall back to the stable herd topic", async () => {
+    const cfg = await tempCfg();
+    const { seen, sender } = capture();
+    const push = new Push(cfg, sender);
+    enable(push, [sub("a")]);
+
+    await push.send({ title: "t", body: "b", topic: "not sendable!" });
+    expect(seen[0]!.options.topic).toBe("collie-herd");
+  });
+});
+describe("Push — per-topic ordering and quiescent flush", () => {
+  function message(payload: string): PushMessageLike {
+    return JSON.parse(payload) as PushMessageLike;
+  }
+
+  type PushMessageLike = { title?: string; type?: string };
+
+  test("serializes one collapse topic while independent topics continue", async () => {
+    const cfg = await tempCfg();
+    const started: string[] = [];
+    let releaseFirst!: () => void;
+    const sender: PushSender = (_sub, payload, options) => {
+      const title = message(payload).title ?? "";
+      started.push(`${options.topic}:${title}`);
+      if (title === "first") {
+        return new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return Promise.resolve();
+    };
+    const push = new Push(cfg, sender);
+    enable(push, [sub("device")]);
+
+    const sameTopic = "aaaaaaaaaaaaaaaaaa";
+    const otherTopic = "bbbbbbbbbbbbbbbbbb";
+    const first = push.send({ title: "first", body: "b", topic: sameTopic });
+    const second = push.send({ title: "second", body: "b", topic: sameTopic });
+    const independent = push.send({ title: "other", body: "b", topic: otherTopic });
+    await Promise.resolve();
+
+    expect(started).toEqual([`${sameTopic}:first`, `${otherTopic}:other`]);
+    releaseFirst();
+    await push.flush();
+    await Promise.all([first, second, independent]);
+    expect(started).toEqual([
+      `${sameTopic}:first`,
+      `${otherTopic}:other`,
+      `${sameTopic}:second`,
+    ]);
+  });
+
+  test("flush waits for work queued while an earlier broadcast settles", async () => {
+    const cfg = await tempCfg();
+    const started: string[] = [];
+    let queueFollowUp!: () => void;
+    let releaseFirst!: () => void;
+    let push!: Push;
+    const sender: PushSender = (_sub, payload) => {
+      const title = message(payload).title ?? "";
+      started.push(title);
+      if (title === "first") {
+        return new Promise<void>((resolve) => {
+          releaseFirst = () => {
+            resolve();
+            queueFollowUp();
+          };
+        });
+      }
+      return Promise.resolve();
+    };
+    push = new Push(cfg, sender);
+    enable(push, [sub("device")]);
+    queueFollowUp = () => {
+      void push.send({ title: "follow-up", body: "b", topic: "same" });
+    };
+
+    void push.send({ title: "first", body: "b", topic: "same" });
+    const flushing = push.flush();
+    await Promise.resolve();
+    releaseFirst();
+    await flushing;
+
+    expect(started).toEqual(["first", "follow-up"]);
+  });
+
+  test("sender rejections are absorbed and flush resolves without an unhandled rejection", async () => {
+    const cfg = await tempCfg();
+    const push = new Push(cfg, () => Promise.reject(new Error("transient")));
+    enable(push, [sub("device")]);
+
+    await expect(push.send({ title: "alert", body: "b", topic: "same" })).resolves.toBeUndefined();
+    await expect(push.flush()).resolves.toBeUndefined();
+  });
+});
+
+describe("Push — named summary topics", () => {
+  test("summary topics are deterministic, session-scoped, and Apple-safe", () => {
+    const adversarial = ["alpha", "alpha/beta", "a:b", "😀".repeat(200), "\ud800"];
+    for (const session of adversarial) {
+      const topic = summaryTopicFor(session);
+      expect(topic).toBe(summaryTopicFor(session));
+      expect(topicIsSendable(topic)).toBe(true);
+    }
+    expect(summaryTopicFor("alpha")).not.toBe(summaryTopicFor("other"));
+    expect(summaryTopicFor("alpha")).not.toBe(paneTopicFor("alpha", "pane"));
   });
 });

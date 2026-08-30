@@ -6,7 +6,8 @@ import type { AuditLog } from "./audit.ts";
 import { isLoopbackBindHost, type Config } from "./config.ts";
 import type { HerdrClient, PaneRead } from "./herdr-client.ts";
 import { computeEtag, gzipJsonResponse, notModified } from "./http-cache.ts";
-import type { NotifyPrefs, NotifyPrefsStore } from "./notify-prefs.ts";
+import type { NotifyPrefs, NotifyPrefsStore, NotifyPreview } from "./notify-prefs.ts";
+import type { NotificationHistoryStore } from "./notify-history.ts";
 import { createOperatorCommands } from "./operator-commands.ts";
 import { createOperatorKeys } from "./operator-keys.ts";
 import { createOperatorQuickReplies } from "./operator-quick-replies.ts";
@@ -16,13 +17,14 @@ import {
   type PromptBindingResult,
 } from "./prompt-binding.ts";
 import type { Push, PushSubscription } from "./push.ts";
-import { herdTagFor, type SessionRegistry } from "./sessions.ts";
+import type { SessionRegistry } from "./sessions.ts";
 import type { Snooze } from "./snooze.ts";
 import { imageExtFromBytes, SNIFF_BYTES } from "./uploads.ts";
 import type { UpdateMonitor } from "./update.ts";
 import type { StateEngine } from "./state-engine.ts";
-import { adapterFor, buildJournalRegistry } from "./journal/registry.ts";
-import { TranscriptStore } from "./journal/store.ts";
+import { adapterFor } from "./journal/registry.ts";
+import { latestAssistantAnswer } from "./journal/store.ts";
+import type { TranscriptStore } from "./journal/store.ts";
 import type { JournalAdapter } from "./journal/types.ts";
 import { toPaneWire } from "./types.ts";
 import type {
@@ -31,6 +33,7 @@ import type {
   BridgeConfig,
   CreateResponse,
   DeviceAuth,
+  PaneAnswerResponse,
   PaneHistoryResponse,
   PaneReadResponse,
   SnapshotResponse,
@@ -105,7 +108,7 @@ export function isLoopbackPeer(address: string | null | undefined): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v4);
 }
 
-const PANE_ROUTE = /^\/api\/pane\/([^/]+)(?:\/(reply|keys|upload|close|rename|history))?$/;
+const PANE_ROUTE = /^\/api\/pane\/([^/]+)(?:\/(reply|keys|upload|close|rename|history|answer))?$/;
 // Turns per history page. "Show entire history" means the WHOLE conversation, so the client asks for
 // everything and this ceiling is a safety net against a pathological log, not the normal path — a
 // 1400-turn session is ~1.4 MB raw / ~400 KB gzipped, which a tailnet link serves fine. The default
@@ -139,12 +142,12 @@ export const SEEN_HEADER = "x-collie-seen";
  * same-origin `fetch` sets it freely.
  *
  * Write actions (reply/keys/upload/close/rename) need no header: they already cleared
- * `guard(…, "write")`, which requires an `Origin`. `history` is a read despite being an action
- * segment, so it needs the header like any other read.
+ * `guard(…, "write")`, which requires an `Origin`. `history` and `answer` are reads despite being action
+ * segments, so they need the header like any other read.
  */
 export function marksPaneSeen(req: Request, action: string | undefined): boolean {
   if (req.headers.get(SEEN_HEADER) !== null) return true;
-  return action !== undefined && action !== "history";
+  return action !== undefined && action !== "history" && action !== "answer";
 }
 
 export function startServer(opts: {
@@ -156,20 +159,17 @@ export function startServer(opts: {
   updateMonitor: UpdateMonitor;
   audit: AuditLog;
   activity: ActivityLedger;
+  journals: Record<string, JournalAdapter> | null;
+  transcripts: TranscriptStore | null;
+  history: NotificationHistoryStore;
 }) {
-  const { cfg, registry, push, snooze, notifyPrefs, updateMonitor, audit, activity } = opts;
-  // One journal registry + store for the process. The store's cache is keyed by absolute path, so
-  // sharing it across herdr sessions AND across harnesses is correct — two sessions can front panes
-  // whose agents write into the same root. Which harnesses have journals at all is decided in
-  // journal/registry.ts, never here.
+  const { cfg, registry, push, snooze, notifyPrefs, updateMonitor, audit, activity, journals, transcripts, history } = opts;
   // One reader per process; it owns the mtime cache that keeps commands.toml off the hot path.
   const operatorCommands = createOperatorCommands(cfg.commandsFile);
   // Its sibling, on the same contract: one reader, one mtime cache, keys.toml off the hot path.
   const operatorKeys = createOperatorKeys(cfg.keysFile);
   // The third on that contract: the Quick dock's groups, quick-replies.toml off the hot path.
   const operatorQuickReplies = createOperatorQuickReplies(cfg.quickRepliesFile);
-  const journals = cfg.transcript ? buildJournalRegistry(cfg.journalRoots) : null;
-  const transcripts = cfg.transcript ? new TranscriptStore() : null;
   /** Does this agent have a journal at all — the snapshot's History-affordance gate. */
   const hasJournal = (agent: string) => adapterFor(journals ?? {}, agent) !== undefined;
   // Per-session background notifications live in each session's runtime (built by the factory in
@@ -276,14 +276,14 @@ export function startServer(opts: {
         const action = paneMatch[2];
         // Reading a pane is allowed for any access-gated client; every action (reply/keys/upload/
         // close) types into or restructures a terminal, so it additionally needs an authorised device.
-        // `history` is a READ despite being an action segment — it only ever reads a log off disk.
-        const isRead = !action || action === "history";
+        // `history` and `answer` are READ despite being action segments — they only ever read a log off disk.
+        const isRead = !action || action === "history" || action === "answer";
         const denied = guard(req, cfg, isRead ? "read" : "write");
         if (denied) return denied;
         const rt = registry.get(sessionName);
         if (!rt) return unknownSession();
         const { herdr, name: session } = rt;
-        // You are in this pane: reading it, replying, sending keys, browsing its history. That is
+        // You are in this pane: reading it, replying, sending keys, browsing its history or answer. That is
         // the whole definition of "seen" (.adr/0003), and this is the one place every such request
         // passes through. It cannot false-positive from background polling — the dashboard loader
         // only ever fetches /api/snapshot; paneLoader is the sole reader of pane text — nor from a
@@ -291,16 +291,18 @@ export function startServer(opts: {
         //
         // Gated on the request actually being ROUTED below. PANE_ROUTE constrains `action` to the
         // known set, so the only way to reach here unrouted is a method mismatch (a GET at /reply, a
-        // POST at /history) — which 405s. Without this a malformed request still marked the pane seen.
+        // POST at /history or /answer) — which 405s. Without this a malformed request still marked the pane seen.
         const routed = isRead ? req.method === "GET" : req.method === "POST";
         if (routed && marksPaneSeen(req, action)) activity.noteSeen(session, paneId);
         // Every action is a write; attribute it to the authorised device for the audit trail.
-        // `history` is a read, so it gets no device attribution (nothing is written to attribute).
+        // `history` and `answer` are reads, so they get no device attribution (nothing is written to attribute).
         const device = isRead ? null : deviceAuth(req, cfg).device;
 
         if (!action && req.method === "GET") return readPane(herdr, cfg, paneId, url, req);
         if (action === "history" && req.method === "GET")
           return paneHistory(cfg, journals, transcripts, rt.engine, paneId, url, req);
+        if (action === "answer" && req.method === "GET")
+          return paneAnswer(cfg, journals, transcripts, rt.engine, paneId, req);
         if (action === "reply" && req.method === "POST") return replyPane(herdr, cfg, paneId, req, audit, device, session);
         if (action === "keys" && req.method === "POST") return keysPane(herdr, cfg, paneId, req, audit, device, session);
         if (action === "upload" && req.method === "POST") return uploadPane(cfg, paneId, req, audit, device, session);
@@ -367,17 +369,30 @@ export function startServer(opts: {
         } catch {
           return text("bad request", 400);
         }
+        if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          return text("bad request", 400);
+        }
         const until = (body as { snoozedUntil?: unknown }).snoozedUntil;
         if (until !== null && typeof until !== "number") return text("bad snoozedUntil", 400);
         await snooze.set(until);
         // Snoozing should also clear whatever's already on the lock screen — across every session,
         // since snooze is bridge-wide. Each session owns its own notification slot (tag).
         if (snooze.isMuted()) {
-          for (const rt of registry.all()) {
-            void push.send({ type: "clear", tag: herdTagFor(rt.isPrimary, rt.name) });
-          }
+          for (const rt of registry.all()) rt.notifications.clearRendered();
         }
         return json({ snoozedUntil: snooze.until() }, req.headers.get("accept-encoding"));
+      }
+      if (pathname === "/api/notifications/history") {
+        const denied = guard(req, cfg, "read");
+        if (denied) return denied;
+        if (req.method === "GET") {
+          return json({ entries: history.list() }, req.headers.get("accept-encoding"));
+        }
+        if (req.method === "DELETE") {
+          await history.clear();
+          return secure(new Response(null, { status: 204 }));
+        }
+        return text("method not allowed", 405);
       }
       if (pathname === "/api/notifications/prefs") {
         // Which agent statuses push (bridge-wide). Read-level like snooze — managing your own
@@ -398,10 +413,26 @@ export function startServer(opts: {
           }
           const patch = parseNotifyPrefsPatch(body);
           if (!patch) return text("bad prefs", 400);
+          const before = notifyPrefs.current();
+          const nextPreview = patch.preview ?? before.preview;
+          const scrubStatus = previewScrubFor(before.preview, nextPreview);
+          // Persist the stricter live policy before touching history. Coordinators read the store at
+          // completion time, so an in-flight preview cannot be recorded under the old policy.
           const updated = await notifyPrefs.set(patch);
           // Prefs may have just disabled a kind — retract any pending/outstanding alerts of it, in
           // every live session (prefs are bridge-wide; each session has its own coordinator).
           for (const rt of registry.all()) rt.notifications.applyPrefs();
+          if (scrubStatus !== null) {
+            try {
+              // This is deliberately last: any completion that raced the preference write has now
+              // observed the stricter policy, and the final scrub removes legacy disallowed copy.
+              if (scrubStatus === "all") await history.scrubPreviews();
+              else await history.scrubPreviews(scrubStatus);
+            } catch (err) {
+              console.warn(`[bridge] notification history scrub failed: ${diagnosticFor(err)}`);
+              return text("notification history scrub failed", 500);
+            }
+          }
           return json(updated, req.headers.get("accept-encoding"));
         }
         return text("method not allowed", 405);
@@ -603,7 +634,60 @@ async function paneHistory(
     if (page === null) return unavailable("no-log");
     return json({ paneId, available: true, ...page } satisfies PaneHistoryResponse, accept);
   } catch (err) {
-    return text(`transcript read failed: ${(err as Error).message}`, 502);
+    console.warn(`[bridge] transcript history read failed: ${diagnosticFor(err)}`);
+    return text("transcript read failed", 502);
+  }
+}
+/**
+ * Map the newest assistant selection to the answer route's response. Pure so the selector behavior can
+ * be tested without standing up Bun.serve or touching a journal.
+ */
+export function paneAnswerResponse(
+  paneId: string,
+  answer: ReturnType<typeof latestAssistantAnswer>,
+): PaneAnswerResponse {
+  return answer === null
+    ? { paneId, available: false, reason: "no-answer" }
+    : { paneId, available: true, ...answer };
+}
+
+/**
+ * GET /api/pane/:id/answer — the newest assistant speech from the pane's live journal.
+ *
+ * The session ref is resolved here from the live snapshot, exactly like paneHistory. The client sends
+ * only a pane id (and optionally a registry session query), never a filesystem path or AgentSessionRef.
+ */
+async function paneAnswer(
+  cfg: Config,
+  journals: Record<string, JournalAdapter> | null,
+  transcripts: TranscriptStore | null,
+  engine: StateEngine,
+  paneId: string,
+  req: Request,
+): Promise<Response> {
+  const accept = req.headers.get("accept-encoding");
+  const unavailable = (
+    reason: "disabled" | "no-session" | "no-log" | "no-answer",
+  ) => json({ paneId, available: false, reason } satisfies PaneAnswerResponse, accept);
+
+  if (!cfg.transcript || transcripts === null || journals === null) return unavailable("disabled");
+
+  const { agents, shellPanes } = engine.current();
+  const pane = [...agents, ...shellPanes].find((a) => a.paneId === paneId);
+  if (!pane?.agentSession) return unavailable("no-session");
+
+  const adapter = adapterFor(journals, pane.agent);
+  if (adapter === undefined) return unavailable("no-session");
+
+  try {
+    const page = await transcripts.page(adapter, pane.agentSession, {
+      limit: Number.MAX_SAFE_INTEGER,
+    });
+    if (page === null) return unavailable("no-log");
+    return json(paneAnswerResponse(paneId, latestAssistantAnswer(page.entries)), accept);
+  } catch (err) {
+    console.warn(`[bridge] transcript answer read failed: ${diagnosticFor(err)}`);
+    return text("transcript read failed", 502);
   }
 }
 
@@ -1301,6 +1385,22 @@ function json(data: unknown, acceptEncoding: string | null, status = 200): Respo
   return secure(new Response(response.body, { status, headers: response.headers }));
 }
 
+const MAX_TRANSCRIPT_DIAGNOSTIC_CHARS = 256;
+
+function diagnosticFor(err: unknown): string {
+  let detail: string;
+  try {
+    detail = err instanceof Error ? err.message : String(err);
+  } catch {
+    detail = "unknown error";
+  }
+  const normalized = detail.replace(/\s+/g, " ").trim();
+  if (!normalized) return "unknown error";
+  const chars = [...normalized];
+  return chars.length > MAX_TRANSCRIPT_DIAGNOSTIC_CHARS
+    ? `${chars.slice(0, MAX_TRANSCRIPT_DIAGNOSTIC_CHARS - 1).join("")}…`
+    : normalized;
+}
 /**
  * A JSON error body with a non-200 status (e.g. an unknown-session 404). The body is tiny (below the
  * gzip threshold), so a plain uncompressed JSON response is the whole story — no need for the gzip
@@ -1320,19 +1420,47 @@ function text(body: string, status: number): Response {
 }
 
 /**
+ * Which persisted notification previews become disallowed when privacy changes. This pure transition
+ * table keeps the downgrade behavior explicit: hidden removes every preview, while blocked removes
+ * only done previews. Upgrades and no-op changes never need a scrub.
+ */
+export function previewScrubFor(
+  before: NotifyPreview,
+  next: NotifyPreview,
+): "all" | "done" | null {
+  if (next === "hidden" && before !== "hidden") return "all";
+  if (before === "all" && next === "blocked") return "done";
+  return null;
+}
+/**
  * Validate an untrusted /api/notifications/prefs body into a partial patch. Only the known keys are
- * considered and each, if present, must be a boolean — a non-boolean value is rejected (null return
- * → 400). Unknown keys are ignored. An empty patch is valid (a no-op that echoes current prefs).
- * Pure + exported so the validation is unit-testable without Bun.serve.
+ * considered and each, if present, must be a boolean or an exact supported enum member — a wrong
+ * present value is rejected (null return → 400). Unknown keys are ignored. An empty patch is valid
+ * (a no-op that echoes current prefs). Pure + exported so the validation is unit-testable without
+ * Bun.serve.
  */
 export function parseNotifyPrefsPatch(v: unknown): Partial<NotifyPrefs> | null {
-  if (typeof v !== "object" || v === null) return null;
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
   const o = v as Record<string, unknown>;
   const patch: Partial<NotifyPrefs> = {};
   for (const key of ["blocked", "done", "updates"] as const) {
     if (!(key in o)) continue;
     if (typeof o[key] !== "boolean") return null;
     patch[key] = o[key] as boolean;
+  }
+  if ("preview" in o) {
+    if (o.preview !== "hidden" && o.preview !== "blocked" && o.preview !== "all") return null;
+    patch.preview = o.preview as NotifyPrefs["preview"];
+  }
+  if ("mode" in o) {
+    if (o.mode !== "summary" && o.mode !== "per-task") return null;
+    patch.mode = o.mode as NotifyPrefs["mode"];
+  }
+  if ("layout" in o) {
+    if (o.layout !== "task-first" && o.layout !== "context-first" && o.layout !== "compact") {
+      return null;
+    }
+    patch.layout = o.layout as NotifyPrefs["layout"];
   }
   return patch;
 }

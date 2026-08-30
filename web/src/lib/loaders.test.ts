@@ -1,7 +1,12 @@
 import { http, HttpResponse } from "msw";
 
 import { server } from "@/test/setup";
-import { fixtureAgents, fixtureSnapshot, paneTextWithDraft } from "@/test/handlers";
+import {
+  fixtureAgents,
+  fixtureNotificationHistory,
+  fixtureSnapshot,
+  paneTextWithDraft,
+} from "@/test/handlers";
 
 // loaders.ts keeps a module-level "last good" cache, so each test re-imports the module fresh
 // (via vi.resetModules) to start from an empty cache and stay independent of run order.
@@ -680,5 +685,73 @@ describe("cold boot with no network", () => {
       await rootLoader();
       expect(sessionStorage.getItem(SNAPSHOT_KEY)).not.toBeNull();
     });
+  });
+});
+describe("notificationHistoryLoader", () => {
+  it("reads the route session but fetches newest-first global history without a session query", async () => {
+    let requestUrl = "";
+    server.use(
+      http.get("/api/notifications/history", ({ request }) => {
+        requestUrl = request.url;
+        return HttpResponse.json({ entries: fixtureNotificationHistory });
+      }),
+    );
+
+    const { notificationHistoryLoader } = await import("./loaders");
+    const data = await notificationHistoryLoader({
+      request: new Request("http://localhost/settings/notifications?s=collie%20demo"),
+    });
+
+    const url = new URL(requestUrl);
+    expect(url.pathname).toBe("/api/notifications/history");
+    expect(url.search).toBe("");
+    expect(data).toEqual({
+      session: "collie demo",
+      entries: fixtureNotificationHistory,
+      error: false,
+    });
+    expect(data.entries.map((entry) => entry.id)).toEqual([
+      "notification-primary",
+      "notification-demo",
+    ]);
+    expect(data.entries.map((entry) => entry.timestamp)).toEqual([2, 1]);
+  });
+
+  it("returns empty history with error true and preserves the route session on HTTP 500", async () => {
+    server.use(
+      http.get("/api/notifications/history", () => new HttpResponse(null, { status: 500 })),
+    );
+
+    const { notificationHistoryLoader } = await import("./loaders");
+    const data = await notificationHistoryLoader({
+      request: new Request("http://localhost/settings/notifications?s=collie-demo"),
+    });
+
+    expect(data).toEqual({ session: "collie-demo", entries: [], error: true });
+  });
+
+  it("returns empty history with error true and preserves the route session on network failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("network failed"));
+
+    const { notificationHistoryLoader } = await import("./loaders");
+    const data = await notificationHistoryLoader({
+      request: new Request("http://localhost/settings/notifications?s=collie-demo"),
+    });
+
+    expect(data).toEqual({ session: "collie-demo", entries: [], error: true });
+  });
+
+  it("rethrows an AbortError from the global history request", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const { notificationHistoryLoader } = await import("./loaders");
+    await expect(
+      notificationHistoryLoader({
+        request: new Request("http://localhost/settings/notifications?s=collie-demo", {
+          signal: controller.signal,
+        }),
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 });

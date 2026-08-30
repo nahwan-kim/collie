@@ -1,11 +1,18 @@
 import { http, HttpResponse } from "msw";
 
 import { server } from "@/test/setup";
-import { fixtureSnapshot } from "@/test/handlers";
+import {
+  fixtureNotificationHistory,
+  fixturePaneAnswer,
+  fixtureSnapshot,
+} from "@/test/handlers";
 import { __resetConnectionHealth, lastHealthyAt } from "./connection-health";
 import {
   checkForUpdates,
+  clearNotificationHistory,
   createTab,
+  fetchLatestAnswer,
+  fetchNotificationHistory,
   fetchPane,
   fetchSnapshot,
   sendKeys,
@@ -15,6 +22,7 @@ import {
   XHR_HEADER,
   XHR_HEADER_VALUE,
 } from "./api";
+import { isBusy } from "./busy";
 
 // The default happy-path handlers live in test/handlers.ts; here we focus on the write paths and the
 // ApiError-on-non-2xx contract that every mutation depends on (and uploadImage's separate code path).
@@ -319,5 +327,127 @@ describe("api client — identity proxy refusals", () => {
     Object.defineProperty(response, "type", { value: "opaqueredirect" });
     vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
     await expect(fetchSnapshot()).rejects.toThrow(/401.*requires sign-in/);
+  });
+});
+describe("api client — answer and notification history", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("fetchLatestAnswer URL-encodes the pane id, composes a named session, and marks the pane seen", async () => {
+    let requestUrl = "";
+    let method = "";
+    let seenHeader: string | null = null;
+    server.use(
+      http.get(/\/api\/pane\/[^/]+\/answer$/, ({ request }) => {
+        requestUrl = request.url;
+        method = request.method;
+        seenHeader = request.headers.get("x-collie-seen");
+        return HttpResponse.json({
+          paneId: "w1:p1",
+          available: true,
+          uuid: "t2",
+          ts: "2026-07-25T06:22:24.093Z",
+          text: "One commit: abc1234.",
+          truncated: false,
+        });
+      }),
+    );
+
+    await fetchLatestAnswer("w1:p1", "collie demo");
+
+    const url = new URL(requestUrl);
+    expect(method).toBe("GET");
+    expect(url.pathname).toBe("/api/pane/w1%3Ap1/answer");
+    expect(url.searchParams.get("session")).toBe("collie demo");
+    expect(url.search).toBe("?session=collie%20demo");
+    expect(seenHeader).toBe("1");
+  });
+
+  it("returns an unavailable answer shape", async () => {
+    server.use(
+      http.get(/\/api\/pane\/[^/]+\/answer$/, () =>
+        HttpResponse.json({
+          paneId: "w1:p1",
+          available: false,
+          reason: "no-answer",
+        }),
+      ),
+    );
+
+    await expect(fetchLatestAnswer("w1:p1")).resolves.toEqual({
+      paneId: "w1:p1",
+      available: false,
+      reason: "no-answer",
+    });
+  });
+
+  it("returns a successful answer shape", async () => {
+    await expect(fetchLatestAnswer("w1:p1")).resolves.toEqual(fixturePaneAnswer);
+  });
+
+  it("passes a caller AbortSignal through to the fetch and rethrows AbortError", async () => {
+    const controller = new AbortController();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      const signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal?.reason), { once: true });
+      });
+    });
+
+    const answer = fetchLatestAnswer("w1:p1", undefined, controller.signal);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect((fetchSpy.mock.calls[0]?.[1] as RequestInit | undefined)?.signal).toBeInstanceOf(
+      AbortSignal,
+    );
+
+    controller.abort();
+    await expect(answer).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("fetchNotificationHistory uses the global history GET path", async () => {
+    let requestUrl = "";
+    let method = "";
+    server.use(
+      http.get("/api/notifications/history", ({ request }) => {
+        requestUrl = request.url;
+        method = request.method;
+        return HttpResponse.json({ entries: fixtureNotificationHistory });
+      }),
+    );
+
+    await expect(fetchNotificationHistory()).resolves.toEqual({
+      entries: fixtureNotificationHistory,
+    });
+
+    const url = new URL(requestUrl);
+    expect(method).toBe("GET");
+    expect(url.pathname).toBe("/api/notifications/history");
+    expect(url.search).toBe("");
+  });
+
+  it("clearNotificationHistory DELETEs the global history path, accepts 204, and tracks busy state", async () => {
+    let release!: () => void;
+    let requestUrl = "";
+    let method = "";
+    const response = new Promise<Response>((resolve) => {
+      release = () => resolve(new HttpResponse(null, { status: 204 }));
+    });
+    server.use(
+      http.delete("/api/notifications/history", ({ request }) => {
+        requestUrl = request.url;
+        method = request.method;
+        return response;
+      }),
+    );
+
+    const clear = clearNotificationHistory();
+    expect(isBusy()).toBe(true);
+    release();
+    await expect(clear).resolves.toBeUndefined();
+    expect(isBusy()).toBe(false);
+
+    const url = new URL(requestUrl);
+    expect(method).toBe("DELETE");
+    expect(url.pathname).toBe("/api/notifications/history");
+    expect(url.search).toBe("");
   });
 });

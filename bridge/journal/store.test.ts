@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { pageEntries, TranscriptStore } from "./store.ts";
+import { latestAssistantAnswer, latestBlockedQuestion, pageEntries, TranscriptStore } from "./store.ts";
 import type { JournalAdapter, TranscriptEntry, TranscriptSource } from "./types.ts";
 
 // The store is harness-BLIND: it resolves through whatever adapter it's handed, caches by absolute
@@ -13,6 +13,13 @@ const entry = (uuid: string): TranscriptEntry => ({
   role: "user",
   parts: [{ kind: "text", text: uuid }],
 });
+
+const turn = (
+  uuid: string,
+  role: TranscriptEntry["role"],
+  parts: TranscriptEntry["parts"],
+  ts = "",
+): TranscriptEntry => ({ uuid, ts, role, parts });
 
 /** Fake adapter over one in-memory log, counting stat/load so caching is observable. */
 function fakeAdapter(lines: string[], opts: { complete?: boolean } = {}) {
@@ -53,6 +60,133 @@ function fakeAdapter(lines: string[], opts: { complete?: boolean } = {}) {
 }
 
 const REF = { kind: "id", value: "s1" } as const;
+describe("journal selectors", () => {
+  test("filters roles and non-speech parts, then skips a blank/tool-only newest assistant turn", () => {
+    const entries: TranscriptEntry[] = [
+      turn("old", "assistant", [
+        { kind: "text", text: "the answer" },
+        { kind: "thinking", text: "private reasoning" },
+        { kind: "tool", name: "Read", summary: "/tmp/a" },
+      ]),
+      turn("user", "user", [{ kind: "text", text: "not an answer" }]),
+      turn("summary", "summary", [{ kind: "text", text: "compaction" }]),
+      turn("note", "note", [{ kind: "text", text: "machine note" }]),
+      turn("new", "assistant", [
+        { kind: "text", text: "   \n\t" },
+        { kind: "thinking", text: "more private reasoning" },
+        { kind: "tool", name: "Bash", summary: "make changes" },
+      ]),
+    ];
+
+    expect(latestAssistantAnswer(entries)).toEqual({
+      uuid: "old",
+      ts: "",
+      text: "the answer",
+      truncated: false,
+    });
+  });
+
+  test("joins every nonblank text part in order and ignores blanks", () => {
+    expect(
+      latestAssistantAnswer([
+        turn("a1", "assistant", [
+          { kind: "text", text: "first" },
+          { kind: "thinking", text: "hidden" },
+          { kind: "text", text: "  second  " },
+          { kind: "text", text: "\n" },
+          { kind: "tool", name: "Read", summary: "file" },
+        ], "2026-08-30T01:02:03Z"),
+      ]),
+    ).toEqual({
+      uuid: "a1",
+      ts: "2026-08-30T01:02:03Z",
+      text: "first\n\n  second  ",
+      truncated: false,
+    });
+  });
+
+  test("propagates part truncation and clamps the aggregate answer to 64 KiB", () => {
+    const propagated = latestAssistantAnswer([
+      turn("a1", "assistant", [{ kind: "text", text: "short", truncated: true }]),
+    ]);
+    expect(propagated).toEqual({
+      uuid: "a1",
+      ts: "",
+      text: "short",
+      truncated: true,
+    });
+
+    const first = "a".repeat(40_000);
+    const second = "b".repeat(40_000);
+    const clamped = latestAssistantAnswer([
+      turn("a2", "assistant", [
+        { kind: "text", text: first },
+        { kind: "text", text: second },
+      ]),
+    ]);
+    expect(clamped).not.toBeNull();
+    expect(clamped!.text).toHaveLength(64 * 1024);
+    expect(clamped!.text).toBe(`${first}\n\n${second}`.slice(0, 64 * 1024));
+    expect(clamped!.truncated).toBe(true);
+  });
+
+  test("prefers newest assistant speech for a blocked preview and flattens it", () => {
+    expect(
+      latestBlockedQuestion([
+        turn("a1", "assistant", [
+          { kind: "tool", name: "AskUserQuestion", summary: "old question (Yes, No)" },
+        ]),
+        turn("a2", "assistant", [
+          { kind: "text", text: "Need approval?\n\nChoose the safe path." },
+          { kind: "tool", name: "AskUserQuestion", summary: "ignored tool fallback" },
+        ], "2026-08-30T01:02:03Z"),
+      ]),
+    ).toEqual({
+      uuid: "a2",
+      ts: "2026-08-30T01:02:03Z",
+      text: "Need approval? Choose the safe path.",
+      truncated: false,
+    });
+  });
+
+  test("uses an AskUserQuestion tool summary when the newest assistant turn has no speech", () => {
+    expect(
+      latestBlockedQuestion([
+        turn("a1", "assistant", [
+          { kind: "thinking", text: "hidden" },
+          { kind: "tool", name: "ask_user_question", summary: "Which mode? (Fast, Safe)" },
+        ]),
+      ]),
+    ).toEqual({
+      uuid: "a1",
+      ts: "",
+      text: "Which mode? (Fast, Safe)",
+      truncated: false,
+    });
+  });
+
+  test("rejects unrelated tool summaries and does not fall back to an older question", () => {
+    expect(
+      latestBlockedQuestion([
+        turn("a1", "assistant", [
+          { kind: "tool", name: "AskUserQuestion", summary: "old question" },
+        ]),
+        turn("a2", "assistant", [
+          { kind: "tool", name: "Bash", summary: "rm -rf /" },
+        ]),
+      ]),
+    ).toBeNull();
+  });
+
+  test("clamps blocked previews to 512 source characters", () => {
+    const summary = latestBlockedQuestion([
+      turn("a1", "assistant", [{ kind: "text", text: "x".repeat(600) }]),
+    ]);
+    expect(summary).not.toBeNull();
+    expect(summary!.text).toHaveLength(512);
+    expect(summary!.truncated).toBe(true);
+  });
+});
 
 describe("TranscriptStore", () => {
   test("pages the newest turns and reports the total", async () => {

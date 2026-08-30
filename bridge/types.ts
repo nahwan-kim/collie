@@ -252,6 +252,35 @@ export type PaneHistoryResponse =
       fileTruncated: boolean;
     };
 
+/** A persisted notification row, with only content allowed by the active privacy policy. */
+export interface NotificationHistoryEntry {
+  id: string;
+  timestamp: number;
+  session?: string;
+  paneId: string;
+  status: "blocked" | "done";
+  work: string;
+  context: string;
+  preview?: string;
+  resolvedAt?: number;
+}
+
+/** GET /api/pane/:id/answer — the latest assistant speech, when a journal can provide one. */
+export type PaneAnswerResponse =
+  | {
+      paneId: string;
+      available: false;
+      reason: "disabled" | "no-session" | "no-log" | "no-answer";
+    }
+  | {
+      paneId: string;
+      available: true;
+      uuid: string;
+      ts: string;
+      text: string;
+      truncated: boolean;
+    };
+
 /**
  * POST /api/pane/:id/{reply,keys} — result of a send. Discriminated on `ok`: a failure always
  * carries the reason Herdr rejected it. `textDelivered` distinguishes the reply partial-failure case

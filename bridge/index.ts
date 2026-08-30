@@ -7,7 +7,15 @@ import { AuditLog, fileAuditAppender } from "./audit.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { EventPoker } from "./event-poker.ts";
 import { DEFAULT_TIMEOUT_MS, HerdrClient } from "./herdr-client.ts";
-import { NotificationCoordinator, makeNotifySink, type NotifyClock } from "./notifications.ts";
+import {
+  NotificationCoordinator,
+  makeNotifySink,
+  reconcileStartupNotificationSlots,
+  type NotifyClock,
+} from "./notifications.ts";
+import { adapterFor, buildJournalRegistry } from "./journal/registry.ts";
+import { latestAssistantAnswer, latestBlockedQuestion, TranscriptStore } from "./journal/store.ts";
+import { NotificationHistoryStore } from "./notify-history.ts";
 import { NotifyPrefsStore } from "./notify-prefs.ts";
 import { Push } from "./push.ts";
 import { startServer } from "./server.ts";
@@ -19,6 +27,7 @@ import {
 } from "./sessions.ts";
 import { Snooze } from "./snooze.ts";
 import { StateEngine } from "./state-engine.ts";
+import type { AgentView } from "./types.ts";
 import {
   bridgeStampSync,
   githubTagsFetcher,
@@ -33,7 +42,7 @@ const SESSION_REFRESH_MS = 15_000;
 // delayed so we never probe the network mid-boot.
 const UPDATE_FIRST_DELAY_MS = 90_000;
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
+const PREVIEW_TIMEOUT_MS = 1500;
 // Entry point: resolve config, wire the pieces, start polling and serving.
 // loadConfig throws on a config that would be unsafe to serve (a non-loopback bind). Print the
 // reason alone — a stack trace here buries the one line the operator needs.
@@ -58,6 +67,18 @@ await snooze.load();
 
 const notifyPrefs = new NotifyPrefsStore(cfg);
 await notifyPrefs.load();
+
+const history = new NotificationHistoryStore(cfg);
+await history.load();
+// A restart under a stricter current policy must not resurrect preview text persisted by an older
+// configuration. Reconcile before the history API or any coordinator can observe the rows.
+await history.reconcilePrivacy(notifyPrefs.current().preview);
+await reconcileStartupNotificationSlots(push, history.list());
+
+// Transcript readers are process-global so every session shares one bounded parse cache. Keep both
+// references null when the feature is disabled, preserving the cheap no-transcript path.
+const journals = cfg.transcript ? buildJournalRegistry(cfg.journalRoots) : null;
+const transcripts = cfg.transcript ? new TranscriptStore() : null;
 
 // When each pane last moved, and when you last looked at it — the two numbers the dashboard sorts
 // and triages by (see activity.ts). Process-global and keyed by session name, because pane ids are
@@ -119,7 +140,7 @@ updateTimer.unref();
 // ── Per-session runtime factory ──────────────────────────────────────────────
 // One HerdrClient + StateEngine + EventPoker + NotificationCoordinator per herdr session. The
 // registry calls this for the primary at construction and for each session discovered later. Push,
-// snooze, notify-prefs, the audit log and the uploads dir stay process-global (shared here).
+// snooze, notify-prefs, history, journal readers, the audit log and uploads dir stay process-global.
 const makeSession: SessionFactory = (name, socketPath, isPrimary) => {
   const herdr = new HerdrClient(socketPath, DEFAULT_TIMEOUT_MS, cfg.dialMode);
   const engine = new StateEngine(herdr, cfg.pollMs);
@@ -151,9 +172,52 @@ const makeSession: SessionFactory = (name, socketPath, isPrimary) => {
     cancel: (h) => clearTimeout(h),
   };
   const sink = makeNotifySink(push, snooze, herdTagFor(isPrimary, name), isPrimary ? undefined : name);
-  const notifications = new NotificationCoordinator(clock, sink, cfg.notifyDelayMs, (status) =>
-    notifyPrefs.isNotifiable(status),
-  );
+  const notifications = new NotificationCoordinator({
+    clock,
+    sink,
+    delayMs: cfg.notifyDelayMs,
+    isNotifiable: (status) => notifyPrefs.isNotifiable(status),
+    prefs: () => notifyPrefs.current(),
+    preview: async (
+      transitioned: AgentView,
+      status: "blocked" | "done",
+    ): Promise<string | undefined> => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const timeoutResult = new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => resolve(undefined), PREVIEW_TIMEOUT_MS);
+      });
+      const read = (async (): Promise<string | undefined> => {
+        if (journals === null || transcripts === null) return undefined;
+        const current = engine.current();
+        const pane = [...current.agents, ...current.shellPanes].find(
+          (candidate) => candidate.paneId === transitioned.paneId,
+        );
+        if (!pane?.agentSession) return undefined;
+        const adapter = adapterFor(journals, pane.agent);
+        if (adapter === undefined) return undefined;
+        const page = await transcripts.page(adapter, pane.agentSession, {
+          limit: Number.MAX_SAFE_INTEGER,
+        });
+        if (page === null) return undefined;
+        const selection =
+          status === "blocked"
+            ? latestBlockedQuestion(page.entries)
+            : latestAssistantAnswer(page.entries);
+        return selection?.text;
+      })();
+      try {
+        return await Promise.race([read, timeoutResult]);
+      } catch {
+        return undefined;
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
+    },
+    history: {
+      record: (draft) => history.record(isPrimary ? draft : { ...draft, session: name }),
+      resolve: (paneId) => history.resolve(isPrimary ? undefined : name, paneId),
+    },
+  });
   engine.onTransition((agent, from, to) => notifications.onTransition(agent, from, to));
   engine.onRemove((paneId) => notifications.onRemove(paneId));
 
@@ -213,22 +277,41 @@ const sweepTimer = setInterval(() => {
 }, SWEEP_INTERVAL_MS);
 sweepTimer.unref();
 
-const server = startServer({ cfg, registry, push, snooze, notifyPrefs, updateMonitor, audit, activity });
+const server = startServer({
+  cfg,
+  registry,
+  push,
+  snooze,
+  notifyPrefs,
+  updateMonitor,
+  audit,
+  activity,
+  journals,
+  transcripts,
+  history,
+});
 
 const shutdown = async () => {
   console.log("\n[bridge] shutting down");
-  // Stop accepting new connections and let in-flight requests drain briefly (non-forced stop)
-  // before we tear down the poll loops and exit.
-  await server.stop();
+  // Stop every producer before the final push flush. Otherwise an update/session timer can enqueue
+  // after flush observes an empty queue and immediately before process exit.
   clearInterval(refreshTimer);
+  clearInterval(sweepTimer);
+  clearTimeout(updateFirstCheck);
+  clearInterval(updateTimer);
+  // Stop accepting new connections and let in-flight requests drain briefly (non-forced stop). A
+  // release check can already be awaiting the network when its timer is cleared, so quiesce the monitor
+  // before session disposal and the final push flush. SessionRegistry.refresh has no asynchronous
+  // continuation: its scan/spawn/dispose work finishes synchronously before its promise is returned.
+  await server.stop();
+  await updateMonitor.flush();
   registry.disposeAll();
+  await push.flush();
   // Writes are debounced, so the last few seconds of "you looked at this" live only in memory —
   // persist them before exiting, or every restart quietly resurrects alerts you'd already cleared.
   activity.stop();
   await activity.flush();
-  clearInterval(sweepTimer);
-  clearTimeout(updateFirstCheck);
-  clearInterval(updateTimer);
+  await history.flush();
   process.exit(0);
 };
 process.on("SIGINT", shutdown);

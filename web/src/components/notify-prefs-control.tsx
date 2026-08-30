@@ -2,15 +2,14 @@ import { BellRing, Loader2 } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { useNotifyPrefs } from "@/hooks/use-notify-prefs";
-import type { NotifyPrefs } from "@/lib/api";
+import { useNotifyPrefs, type BooleanNotifyPrefKey } from "@/hooks/use-notify-prefs";
 
 // Which lifecycle events are worth a push. Bridge-wide (fans out to every device, like the snooze),
 // so the copy says so. Three switches: "Needs input" (blocked, default on), "Finished" (done,
 // default off), and "App updates" (updates, default on). Optimistic toggle with revert on failure —
 // see useNotifyPrefs.
 
-const ROWS: ReadonlyArray<{ key: keyof NotifyPrefs; label: string; hint: string }> = [
+const ROWS: ReadonlyArray<{ key: BooleanNotifyPrefKey; label: string; hint: string }> = [
   { key: "blocked", label: "Needs input", hint: "an agent is waiting on you" },
   { key: "done", label: "Finished", hint: "an agent completes its task" },
   { key: "updates", label: "App updates", hint: "a new Collie version is available" },

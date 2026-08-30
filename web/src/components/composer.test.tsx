@@ -114,6 +114,21 @@ function renderComposerWithStatus(overrides: Partial<ComponentProps<typeof Compo
   render(<RouterProvider router={router} />);
   return props;
 }
+function installClipboard(writeText: (text: string) => Promise<void>) {
+  const write = vi.fn(writeText);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: write },
+  });
+  return write;
+}
+
+function removeClipboard() {
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: undefined,
+  });
+}
 
 describe("Composer — send", () => {
   // #34: a dialog owns the TUI's keyboard. Sending free text at one loses the message AND makes the
@@ -1895,6 +1910,187 @@ describe("Composer — display prefs behind the gear", () => {
   });
 });
 
+describe("Composer — copy latest answer", () => {
+  it("places Copy last answer immediately before Display settings", () => {
+    renderComposer();
+
+    const copy = screen.getByRole("button", { name: "Copy last answer" });
+    expect(copy).toHaveClass("size-8");
+    const row = copy.parentElement;
+    expect(row).not.toBeNull();
+    const labels = Array.from(row!.querySelectorAll("button")).map(
+      (button) => button.getAttribute("aria-label") ?? button.textContent?.trim(),
+    );
+    expect(labels).toEqual([
+      "Keys",
+      "Type into terminal",
+      "Quick",
+      "Agent",
+      "Copy last answer",
+      "Display settings",
+    ]);
+  });
+
+  it("requests the authoritative answer endpoint with the session and seen header", async () => {
+    const user = userEvent.setup();
+    const writeText = installClipboard(async () => {});
+    let requestUrl = "";
+    let seenHeader = "";
+    server.use(
+      http.get(/\/api\/pane\/[^/]+\/answer$/, ({ request }) => {
+        requestUrl = request.url;
+        seenHeader = request.headers.get("x-collie-seen") ?? "";
+        return HttpResponse.json({
+          paneId: "w1:p1",
+          available: true,
+          uuid: "answer",
+          ts: "",
+          text: "authoritative answer only",
+          truncated: false,
+        });
+      }),
+    );
+    const props = renderComposerWithStatus({ session: "collie-demo" });
+    const box = screen.getByPlaceholderText(/type a reply/i);
+    await user.type(box, "keep this draft");
+
+    await user.click(screen.getByRole("button", { name: "Copy last answer" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("authoritative answer only"));
+    const url = new URL(requestUrl);
+    expect(url.pathname).toBe("/api/pane/w1%3Ap1/answer");
+    expect(url.search).toBe("?session=collie-demo");
+    expect(seenHeader).toBe("1");
+    expect(screen.getByTestId("status")).toHaveTextContent("Answer copied");
+    expect(box).toHaveValue("keep this draft");
+    expect(props.onSent).not.toHaveBeenCalled();
+  });
+
+  it("stays disabled while the answer fetch and copy are in flight", async () => {
+    const user = userEvent.setup();
+    const writeText = installClipboard(async () => {});
+    let releaseAnswer!: () => void;
+    const answerGate = new Promise<void>((resolve) => {
+      releaseAnswer = resolve;
+    });
+    let requests = 0;
+    server.use(
+      http.get(/\/api\/pane\/[^/]+\/answer$/, async () => {
+        requests += 1;
+        await answerGate;
+        return HttpResponse.json({
+          paneId: "w1:p1",
+          available: true,
+          uuid: "answer",
+          ts: "",
+          text: "ready",
+          truncated: false,
+        });
+      }),
+    );
+    const props = renderComposer();
+    const box = screen.getByPlaceholderText(/type a reply/i);
+    await user.type(box, "draft survives");
+    const copy = screen.getByRole("button", { name: "Copy last answer" });
+
+    await user.click(copy);
+    fireEvent.click(copy); // fireEvent bypasses the disabled attribute to exercise the ref guard.
+
+    expect(requests).toBe(1);
+    expect(copy).toBeDisabled();
+    expect(copy).toHaveAttribute("aria-busy", "true");
+    releaseAnswer();
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("ready"));
+    expect(copy).toBeEnabled();
+    expect(box).toHaveValue("draft survives");
+    expect(props.onSent).not.toHaveBeenCalled();
+  });
+
+  it("reports unavailable and no-answer responses as No answer to copy without writing", async () => {
+    const user = userEvent.setup();
+    const writeText = installClipboard(async () => {});
+    server.use(
+      http.get(/\/api\/pane\/[^/]+\/answer$/, () =>
+        HttpResponse.json({ paneId: "w1:p1", available: false, reason: "no-answer" }),
+      ),
+    );
+    renderComposerWithStatus();
+
+    await user.click(screen.getByRole("button", { name: "Copy last answer" }));
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("No answer to copy"));
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("reports answer fetch failures as Couldn't copy answer", async () => {
+    const user = userEvent.setup();
+    const writeText = installClipboard(async () => {});
+    server.use(
+      http.get(/\/api\/pane\/[^/]+\/answer$/, () =>
+        HttpResponse.json({ error: "answer failed" }, { status: 500 }),
+      ),
+    );
+    renderComposerWithStatus();
+
+    await user.click(screen.getByRole("button", { name: "Copy last answer" }));
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("Couldn't copy answer"));
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("reports a missing Clipboard API and permission failures as Couldn't copy answer", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get(/\/api\/pane\/[^/]+\/answer$/, () =>
+        HttpResponse.json({
+          paneId: "w1:p1",
+          available: true,
+          uuid: "answer",
+          ts: "",
+          text: "answer",
+          truncated: false,
+        }),
+      ),
+    );
+    removeClipboard();
+    renderComposerWithStatus();
+
+    await user.click(screen.getByRole("button", { name: "Copy last answer" }));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("Couldn't copy answer"));
+
+    const writeText = installClipboard(async () => {
+      throw new Error("clipboard denied");
+    });
+    await user.click(screen.getByRole("button", { name: "Copy last answer" }));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("Couldn't copy answer"));
+    expect(writeText).toHaveBeenCalledWith("answer");
+  });
+
+  it.each([
+    ["shell", { isShell: true }],
+    ["gone", { gone: true }],
+  ])("is disabled for %s panes", (_label, overrides) => {
+    renderComposer(overrides);
+    expect(screen.getByRole("button", { name: "Copy last answer" })).toBeDisabled();
+  });
+
+  it("remains enabled on a read-only device and leaves the composer state alone", async () => {
+    const user = userEvent.setup();
+    const writeText = installClipboard(async () => {});
+    const props = renderComposerWithStatus({ readOnly: true });
+    const box = screen.getByPlaceholderText(/read-only/i);
+    expect(box).toBeDisabled();
+
+    const copy = screen.getByRole("button", { name: "Copy last answer" });
+    expect(copy).toBeEnabled();
+    await user.click(copy);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("One commit: abc1234."));
+    expect(screen.getByTestId("status")).toHaveTextContent("Answer copied");
+    expect(box).toBeDisabled();
+    expect(props.onSent).not.toHaveBeenCalled();
+  });
+});
 describe("Composer — a composed key queue is guarded on the way out", () => {
   /** Open Keys and stage one chord, so the queue is genuinely dirty. */
   async function stageAKey(user: ReturnType<typeof userEvent.setup>) {

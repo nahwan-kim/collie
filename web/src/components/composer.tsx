@@ -1,12 +1,13 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, ReactNode } from "react";
 import { useRevalidator } from "react-router";
-import { Check, ImagePlus, Keyboard, Loader2, Send, Settings2, Slash, Terminal, X, Zap } from "lucide-react";
+import { Check, Copy, ImagePlus, Keyboard, Loader2, Send, Settings2, Slash, Terminal, X, Zap } from "lucide-react";
 
 import type { DisplayPrefs } from "@/hooks/use-display-prefs";
 import { usePendingConfirm } from "@/hooks/use-pending-confirm";
 import { useDirectTyping } from "@/hooks/use-direct-typing";
 import { setStatus } from "@/lib/status";
+import { copyLatestAnswer } from "@/lib/latest-answer";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ChatInput } from "@/components/ui/chat/chat-input";
@@ -204,6 +205,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [session, paneId]);
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [copyingAnswer, setCopyingAnswer] = useState(false);
+  const copyingAnswerRef = useRef(false);
   // Pending-send preview: set on a successful send, cleared when the mirror catches up (next text
   // update) or after a 6s safety timeout. Shows "You sent: …" so the user knows the message landed.
   const [lastSent, setLastSent] = useState<string | null>(null);
@@ -698,6 +701,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       setUploading(false);
     }
   }
+  async function handleCopyLatestAnswer() {
+    if (isShell || gone || copyingAnswerRef.current) return;
+    copyingAnswerRef.current = true;
+    setCopyingAnswer(true);
+    try {
+      const result = await copyLatestAnswer(() => api.fetchLatestAnswer(paneId, session));
+      if (result === "copied") {
+        setStatus("Answer copied", "success");
+      } else if (result === "empty") {
+        setStatus("No answer to copy", "info");
+      } else {
+        setStatus("Couldn't copy answer", "error");
+      }
+    } catch {
+      setStatus("Couldn't copy answer", "error");
+    } finally {
+      copyingAnswerRef.current = false;
+      setCopyingAnswer(false);
+    }
+  }
 
   async function onPickImage(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -782,11 +805,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             />
           </ComposerDock>
         )}
-        {/* The one action row: Keys · Quick · Agent · ⚙ (Agent only when the pane's agent has
+        {/* The one action row: Keys · Quick · Agent · Copy · ⚙ (Agent only when the pane's agent has
             commands). Display prefs used to sit on a second, permanent icon-only "View" row above
-            this one; folding them behind the ⚙ gives the mirror that row back. The gear is icon-only
-            and NOT flex-1 — it's a settings affordance, not a peer of the three action toggles, and
-            keeping it narrow leaves the labelled buttons their width on a 390px phone. */}
+            this one; folding them behind the ⚙ gives the mirror that row back. Copy is a read-only
+            transcript action, so it remains usable on a read-only device but not for shell/gone panes.
+            Both icon-only controls are NOT flex-1, keeping the labelled buttons their width on a phone. */}
         {/* The "Controls" tag is lifted OUT of the row's flex flow and floated just above it. In
             flow it was a fixed ~60px of a 390px phone width spent on a word that never changes,
             which is what squeezed the toggles; absolute costs nothing and the row gets the width
@@ -866,6 +889,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               Agent
             </Button>
           )}
+          {/* Copy is a read-only transcript action, so it remains available on read-only devices but
+              has no meaning for shell or gone panes. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8 shrink-0 text-muted-foreground"
+            disabled={copyingAnswer || isShell || gone}
+            aria-label="Copy last answer"
+            aria-busy={copyingAnswer}
+            onClick={() => void handleCopyLatestAnswer()}
+          >
+            {copyingAnswer ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />}
+          </Button>
           {/* Display prefs. Not gated on `locked`: wrap/font/raw-terminal are local view state, so a
               read-only device or a gone pane can still make its mirror readable. */}
           <Button
