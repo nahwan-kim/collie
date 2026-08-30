@@ -55,7 +55,7 @@ export type { AutocompleteModel, AutocompleteEntry } from "./harness/autocomplet
 /** One visual line: the styled segments that make it up, with the line-terminating "\n" removed. */
 export interface StyledLine {
   segments: AnsiSegment[];
-  /** Keep this known terminal-width border on one visual row when the mirror wraps. */
+  /** Keep this known terminal-width rule or framed grid row on one visual row when the mirror wraps. */
   noWrap?: true;
 }
 
@@ -191,29 +191,88 @@ export function splitLines(segments: AnsiSegment[]): StyledLine[] {
   return lines;
 }
 
-// A terminal-width horizontal border is visually useless when browser wrapping turns it into several rows.
-// This deliberately accepts only one repeated horizontal rule glyph (apart from terminal padding): labels,
-// mixed rows, corners/tables, prose, and ASCII rules keep the mirror's ordinary wrapping.
+// A terminal-width rule or framed grid row is visually useless when browser wrapping turns it into
+// several rows. The latter is worse: a boxed composer body becomes one text row followed by screens of
+// wrapped padding, while its top/bottom borders repeat across the viewport. Keep those rows intact and
+// clip them at the phone edge; ordinary prose still wraps.
 //
 // Twenty stands on two facts of its own, and deliberately cites no other threshold. (1) Nothing in prose,
-// markdown or code runs to twenty IDENTICAL rule glyphs, so the classifier cannot fire on real content.
-// (2) Below roughly twenty columns a row already fits the narrowest mirror without wrapping, so clipping
-// it would buy nothing — the only rows worth clipping are the ones wide enough to wrap.
+// markdown or code runs to twenty identical rule glyphs, so the rule-run probes do not fire on real content.
+// (2) A framed row shorter than roughly twenty columns already fits the narrowest mirror, so clipping it
+// would buy nothing — the only rows worth clipping are the ones wide enough to wrap.
 //
 // An earlier revision derived this number from the Claude grammar's own 20-glyph box-border run. That run
 // no longer exists: it was a hidden assumption that the pane is at least twenty columns wide, which is
 // exactly what stalled the reply guard on a 19-column pane (issue #76), and markers.ts replaced it with a
 // display-cell floor. Do not re-couple the two. They classify borders for different consumers with
 // opposite failure costs — a false positive there types Enter into the wrong screen, a false positive here
-// crops a short rule — so they share the glyph alphabet in rule-glyphs.ts and nothing else.
-const MIN_NO_WRAP_BORDER_LENGTH = 20;
+// crops a visual row — so they share the rule-run alphabet in rule-glyphs.ts and nothing else.
+const MIN_NO_WRAP_ROW_LENGTH = 20;
 const PURE_HORIZONTAL_BORDER = new RegExp(
-  `^([${PURE_HORIZONTAL_RULE_GLYPH_CLASS}])\\1{${MIN_NO_WRAP_BORDER_LENGTH - 1},}$`,
+  `^([${PURE_HORIZONTAL_RULE_GLYPH_CLASS}])\\1{${MIN_NO_WRAP_ROW_LENGTH - 1},}$`,
 );
+const INTERNAL_LAYOUT_RULE = new RegExp(
+  `([${PURE_HORIZONTAL_RULE_GLYPH_CLASS}])\\1{${MIN_NO_WRAP_ROW_LENGTH - 1},}.*[^\\s\\u2500-\\u257f]`,
+  "u",
+);
+const BOX_DRAWING_GLYPH = /^[\u2500-\u257f]$/u;
+const STATUS_COLUMN_GLYPH = /[│┃║]/u;
+const HORIZONTAL_RULE_GLYPH = new RegExp(`^[${PURE_HORIZONTAL_RULE_GLYPH_CLASS}]$`, "u");
+const DIAGONAL_BOX_GLYPH = /^[╱╲╳]$/u;
+const STRUCTURAL_INNER_GLYPH = new RegExp(
+  `[^\\u2500-\\u257f]|[${PURE_HORIZONTAL_RULE_GLYPH_CLASS}]`,
+  "u",
+);
+
+/** A box endpoint with a vertical connection: corners, verticals, tees, or junctions — never a
+ * horizontal-only rule or diagonal. Requiring one at BOTH ends keeps labelled rules wrappable. */
+function isBoxEdge(glyph: string): boolean {
+  return (
+    BOX_DRAWING_GLYPH.test(glyph) &&
+    !HORIZONTAL_RULE_GLYPH.test(glyph) &&
+    !DIAGONAL_BOX_GLYPH.test(glyph)
+  );
+}
+
+function isFramedTerminalRow(row: string): boolean {
+  if (row.length < MIN_NO_WRAP_ROW_LENGTH) return false;
+
+  const first = row[0]!;
+  const last = row[row.length - 1]!;
+  if (!isBoxEdge(first) || !isBoxEdge(last)) return false;
+
+  // Reject contrived runs such as `┌┌┌…`: a real frame has content/padding or a horizontal stroke
+  // between its two structural edges. This keeps the visual classifier narrow without coupling it
+  // to any harness's safety-sensitive input-box grammar. The endpoints cannot satisfy this regex,
+  // so testing the whole row avoids another substring allocation.
+  return STRUCTURAL_INNER_GLYPH.test(row);
+}
+
+function hasInternalLayoutRule(row: string): boolean {
+  if (row.length < MIN_NO_WRAP_ROW_LENGTH) return false;
+
+  // A plain labelled rule starts with its rule and remains wrappable so its label cannot be cropped.
+  // Terminal status rows instead put content first and use a long rule as layout filler before later
+  // fields; wrapping that filler is what scatters one status row over several phone rows. Requiring
+  // non-box content after the run avoids mistaking a side-by-side preview's right-hand border for filler.
+  return (
+    !BOX_DRAWING_GLYPH.test(row[0]!) &&
+    !HORIZONTAL_RULE_GLYPH.test(row[0]!) &&
+    STATUS_COLUMN_GLYPH.test(row) &&
+    INTERNAL_LAYOUT_RULE.test(row)
+  );
+}
 
 function styledLine(segments: AnsiSegment[]): StyledLine {
   const text = segments.map((segment) => segment.text).join("");
-  return PURE_HORIZONTAL_BORDER.test(text.trim()) ? { segments, noWrap: true } : { segments };
+  const row = text.trim();
+  return (
+    PURE_HORIZONTAL_BORDER.test(row) ||
+    isFramedTerminalRow(row) ||
+    hasInternalLayoutRule(row)
+  )
+    ? { segments, noWrap: true }
+    : { segments };
 }
 
 // The two generic StyledLine probes. They live HERE, in the core AST module that imports nothing
