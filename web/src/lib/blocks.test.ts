@@ -102,61 +102,88 @@ describe("splitLines — exact text preservation", () => {
   });
 });
 
-describe("splitLines — no-wrap terminal borders", () => {
+describe("splitLines — no-wrap terminal grid rows", () => {
   // This is the complete horizontal subset of the established Claude rule contract. Keep it
   // independent from the clipping classifier so adding a Claude-accepted horizontal glyph cannot
-  // silently leave it wrapping. Corners, junctions, and vertical box drawing are deliberately absent.
+  // silently leave it wrapping.
   const pureHorizontalRuleGlyphs = [
     ..."─━┄┅┈┉╌╍═╴╶╸╺╼╾",
     ...Array.from({ length: 0x2594 - 0x2581 + 1 }, (_, i) => String.fromCodePoint(0x2581 + i)),
     ..."‒–—―",
   ];
 
+  const classified = (text: string) => splitLines(parseAnsi(text))[0]!;
+
   it("clips every established pure horizontal rule glyph only at the long-border threshold", () => {
     for (const glyph of pureHorizontalRuleGlyphs) {
       // Claude recognizes rules at three glyphs; visual clipping remains intentionally stricter.
       expect(isHorizontalRule(glyph.repeat(3)), glyph).toBe(true);
-      expect(splitLines(parseAnsi(glyph.repeat(19)))[0]!.noWrap, glyph).toBeUndefined();
-      expect(splitLines(parseAnsi(glyph.repeat(20)))[0]!.noWrap, glyph).toBe(true);
+      expect(classified(glyph.repeat(19)).noWrap, glyph).toBeUndefined();
+      expect(classified(glyph.repeat(20)).noWrap, glyph).toBe(true);
     }
   });
 
-  it("marks an ANSI-segmented border", () => {
-    const border = "─".repeat(20);
-    const ansi = splitLines(parseAnsi(`${ESC}[31m${border.slice(0, 10)}${ESC}[34m${border.slice(10)}${ESC}[0m`))[0]!;
+  it.each([
+    ["rounded top border", `╭${"─".repeat(38)}╮`],
+    ["vertical content row", `│ > Type your message...${" ".repeat(24)}│`],
+    ["padded blank row", `│${" ".repeat(38)}│`],
+    ["table separator", `├${"─".repeat(18)}┼${"─".repeat(18)}┤`],
+    ["double bottom border", `╚${"═".repeat(38)}╝`],
+    ["status row with internal filler", `⬢ model │ main ${"─".repeat(38)} rate │ cost`],
+  ])("clips a wide %s without changing its text", (_name, text) => {
+    const line = classified(text);
+    expect(line.noWrap).toBe(true);
+    expect(joinLines([line])).toBe(text);
+  });
+
+  it("marks an ANSI-segmented framed row without flattening its styles", () => {
+    const row = `│ ${"x".repeat(36)} │`;
+    const ansi = classified(
+      `${ESC}[31m${row.slice(0, 20)}${ESC}[34m${row.slice(20)}${ESC}[0m`,
+    );
 
     expect(ansi.noWrap).toBe(true);
     expect(ansi.segments).toHaveLength(2);
-    expect(joinLines([ansi])).toBe(border);
+    expect(ansi.segments.map((segment) => segment.fg)).toEqual([
+      "var(--ansi-1)",
+      "var(--ansi-4)",
+    ]);
+    expect(joinLines([ansi])).toBe(row);
   });
 
-  it("clips at twenty glyphs and not below", () => {
-    expect(splitLines(parseAnsi("─".repeat(19)))[0]!.noWrap).toBeUndefined();
-    expect(splitLines(parseAnsi("─".repeat(20)))[0]!.noWrap).toBe(true);
+  it("clips rules and framed rows at twenty glyphs, not below", () => {
+    expect(classified("─".repeat(19)).noWrap).toBeUndefined();
+    expect(classified("─".repeat(20)).noWrap).toBe(true);
+    expect(classified(`╭${"─".repeat(17)}╮`).noWrap).toBeUndefined();
+    expect(classified(`╭${"─".repeat(18)}╮`).noWrap).toBe(true);
   });
 
   // The clip rule and the input-box grammar both call a line a "border", for different consumers
-  // (see rule-glyphs.ts). A labelled border is the case where they must visibly disagree: the guard
-  // has to recognise it, and clipping it would crop the session label out of view. Pinned across
-  // both modules so a future edit to either cannot quietly align them.
-  it("never clips a labelled input-box border the guard depends on", () => {
+  // (see rule-glyphs.ts). A plain labelled rule has no framing corners, so it stays wrappable: the
+  // guard may recognise it without the visual classifier cropping its session label.
+  it("never clips a plain labelled input-box border the guard depends on", () => {
     const labelled = `${"─".repeat(20)} japanese technical troubleshooting ${"─".repeat(2)}`;
     expect(isBoxBorder(labelled)).toBe(true);
-    expect(splitLines(parseAnsi(labelled))[0]!.noWrap).toBeUndefined();
+    expect(classified(labelled).noWrap).toBeUndefined();
   });
 
   it.each([
     ["short Unicode rule", "─".repeat(19)],
     ["ASCII rule", "-".repeat(40)],
-    ["labeled border", `${"─".repeat(20)} Pi ${"─".repeat(20)}`],
+    ["labelled rule", `${"─".repeat(20)} Pi ${"─".repeat(20)}`],
     ["mixed rule row", "─".repeat(19) + "╌"],
     ["mixed content", `${"─".repeat(20)}x`],
-    ["corner row", "┌".repeat(40)],
-    ["vertical row", "│".repeat(40)],
-    ["table edge", `┌${"─".repeat(40)}┐`],
+    ["repeated corners", "┌".repeat(40)],
+    ["repeated verticals", "│".repeat(40)],
+    ["missing right edge", `│ content${" ".repeat(40)}`],
+    ["missing left edge", `${" ".repeat(40)}content │`],
+    ["diagonal endpoints", `╱${"─".repeat(38)}╲`],
+    ["side-by-side preview border", `❯ 1. Grid ${" ".repeat(8)}┌${"─".repeat(38)}┐`],
+    ["label after an internal rule", `title ${"─".repeat(38)} details`],
+    ["interior box glyphs", `prose │ inside a line ${"x".repeat(20)} │`],
     ["prose", "This ordinary prose should retain its normal wrapping behavior."],
   ])("does not mark %s", (_name, text) => {
-    expect(splitLines(parseAnsi(text))[0]!.noWrap).toBeUndefined();
+    expect(classified(text).noWrap).toBeUndefined();
   });
 });
 

@@ -1,6 +1,6 @@
 // Shared Unicode rule-glyph classes. Claude's grammar intentionally retains its established broad
-// box-drawing contract; visual clipping narrows that to glyphs that are themselves horizontal, so
-// a repeated corner/junction can never be mistaken for a terminal-width border.
+// box-drawing contract; visual clipping uses the horizontal-only subset for repeated rules and layout
+// filler. Framed rows are classified separately from their paired structural endpoints in blocks.ts.
 //
 // THIS FILE IS THE WHOLE SHARED SURFACE, AND IT IS MEANT TO STAY THAT WAY. Two things in this
 // codebase decide whether a line is a border, and the obvious tidy-up — one predicate, one
@@ -10,9 +10,9 @@
 //     decide whether the reply guard may press Enter. Its false positive types a message into a
 //     screen that is not the input box. It is therefore the narrowest possible test — U+2500 only,
 //     floored in display cells — and not one of these constants.
-//   · `blocks.ts` (PURE_HORIZONTAL_BORDER) asks whether this row is TOO WIDE TO WRAP NICELY, to
-//     decide whether to clip it. Its false positive crops a short rule. It can afford a broad glyph
-//     set and a plain repetition count.
+//   · `blocks.ts` asks whether this row is TOO WIDE TO WRAP NICELY, to decide whether to clip it.
+//     Pure rules and mixed status rows use this horizontal alphabet; framed rows use their paired
+//     outer edges. Its false positive crops one visual row, so every shape keeps a conservative floor.
 //
 // Same word, different question, and the costs of being wrong are not comparable. markers.ts:86–103
 // records what happened the last time one of these tests was reused for the other job — a spaced-out

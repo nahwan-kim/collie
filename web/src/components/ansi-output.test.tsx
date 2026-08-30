@@ -94,6 +94,30 @@ describe("mirror line wrapping", () => {
     expect(pre.textContent).toBe(`ordinary prose\n${border}\nsee https://herdr.dev/docs\n`);
   });
 
+  it("keeps boxed composer, table, and status rows clipped while prose still wraps", () => {
+    const gridRows = [
+      `╭${"─".repeat(38)}╮`,
+      `│ > Type your message...${" ".repeat(24)}│`,
+      `├${"─".repeat(18)}┼${"─".repeat(18)}┤`,
+      `╰${"─".repeat(38)}╯`,
+      `⬢ model │ main ${"─".repeat(38)} rate │ cost`,
+    ];
+    const prose = "ordinary prose remains a normal long line that can wrap on a narrow phone";
+    const text = [...gridRows, prose].join("\n");
+    const { container } = render(<AnsiOutput text={text} />);
+    const pre = container.querySelector("pre")!;
+    const clipped = [...pre.querySelectorAll("span.inline-block")];
+
+    expect(clipped.map((row) => row.textContent)).toEqual(gridRows);
+    expect(clipped.every((row) => row.className.includes("overflow-hidden"))).toBe(true);
+    expect(pre.textContent).toBe(text);
+
+    const { container: panned } = render(<AnsiOutput text={text} wrap={false} />);
+    expect(panned.querySelector("pre")!.className).toContain("overflow-x-auto");
+    expect(panned.querySelector("span.inline-block")).toBeNull();
+    expect(panned.querySelector("pre")!.textContent).toBe(text);
+  });
+
   it("clips a plain border only while wrapping, leaving ordinary output and wrap-off panning alone", () => {
     const border = `  ${"─".repeat(20)}  `;
     const { container: plain } = render(<AnsiOutput text={`${border}\n`} />);
