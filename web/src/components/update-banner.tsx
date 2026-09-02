@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { useRouteLoaderData } from "react-router";
 
+import { useLocale } from "@/hooks/use-locale";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import { ROOT_ROUTE_ID, type HomeData } from "@/lib/loaders";
 import type { UpdateInfo } from "@/lib/types";
+import { useOptionalRootData } from "@/lib/route-data";
 
 // The footer "update available" chip, sitting next to the build stamp. It reads the snapshot's
 // optional `update` field (surfaced on the root loader data) and, when there's something to do,
@@ -13,9 +14,10 @@ import type { UpdateInfo } from "@/lib/types";
 export interface UpdateNotice {
   /** The human line, e.g. "Bridge restart needed" / "Collie 0.12.0 available". */
   line: string;
-  /** A copyable command that resolves it — a Herdr plugin action, so it runs from ANY directory
-   *  (Herdr resolves the plugin's checkout). Only the RESTART case carries one: it has no page to link
-   *  to. The release case sends you to `href` instead, where the release notes carry the commands. */
+  /** A copyable command that resolves it, spelled for the install kind — the Herdr plugin action on a
+   *  Herdr-managed checkout (Herdr resolves the plugin's checkout, so it runs from ANY directory), the
+   *  `collie` verb everywhere else. Only the RESTART and MAJOR cases carry one; the release case sends
+   *  you to `href` instead, where the release notes carry the commands. */
   command?: string;
   /** GitHub release page for the available version — the line links to it. Absent for the restart case. */
   href?: string;
@@ -29,35 +31,47 @@ export interface UpdateNotice {
  */
 export function updateNotice(update: UpdateInfo | undefined): UpdateNotice | null {
   if (!update) return null;
+  // The command spelling is a function of the install kind (M14/01 §5.3): Herdr's plugin actions
+  // reach only a Herdr-managed (detached) checkout — on a binary install, a linked dev clone or an
+  // unknown layout they name a plugin Herdr does not manage, so those get the `collie` verbs, which
+  // work everywhere the CLI is on PATH. An absent kind is an older bridge from the git-install era,
+  // which is read as Herdr-managed so the advice never regresses mid-upgrade.
+  const herdrManaged = update.installKind === undefined || update.installKind === "detached-checkout";
   if (update.bridgeStale) {
-    // No release page for "restart needed" — show the Herdr restart action to copy.
+    // No release page for "restart needed" — show the one command that restarts it, to copy.
     return {
-      line: "Bridge restart needed",
-      command: "herdr plugin action invoke restart --plugin herdr.collie",
+      line: t("settings.updateBanner.restart"),
+      command: herdrManaged
+        ? "herdr plugin action invoke restart --plugin herdr.collie"
+        : "collie restart",
     };
   }
   // Guard on `latest` too: without a version string there's nothing meaningful to name. The release
   // page (linked) carries the update commands, so the footer just links there.
   if (update.releaseAvailable && update.latest) {
-    return { line: `Collie ${update.latest} available`, href: update.latestUrl ?? undefined };
+    return {
+      line: t("settings.updateBanner.releaseAvailable", { version: update.latest }),
+      href: update.latestUrl ?? undefined,
+    };
   }
   // A MAJOR is out. It ranks below a routine release because it is the one thing the plain update
   // action will NOT take (ADR 0020) — so this line names the consent command instead of leaving the
   // operator to tap update, see it succeed, and still see a banner.
   if (update.majorAvailable) {
     return {
-      line: `Collie ${update.majorAvailable} — a new major`,
+      line: t("settings.updateBanner.majorAvailable", { version: update.majorAvailable }),
       href: update.majorUrl ?? undefined,
-      command: "herdr plugin action invoke update-major --plugin herdr.collie",
+      command: herdrManaged
+        ? "herdr plugin action invoke update-major --plugin herdr.collie"
+        : "collie update --major",
     };
   }
   return null;
 }
 
 export function UpdateBanner({ className }: { className?: string }) {
-  // Home is the root route; space/settings are its children — so the root loader data (and its
-  // `update`) is in scope for all three footers via one read.
-  const data = useRouteLoaderData(ROOT_ROUTE_ID) as HomeData | undefined;
+  useLocale();
+  const data = useOptionalRootData();
   const notice = updateNotice(data?.update);
   const [copied, setCopied] = useState(false);
 
@@ -101,7 +115,7 @@ export function UpdateBanner({ className }: { className?: string }) {
           <button
             type="button"
             onClick={copy}
-            aria-label={`Copy command: ${notice.command}`}
+            aria-label={t("settings.updateBanner.copyAria", { command: notice.command })}
             className="inline-flex items-center gap-1 align-middle rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-foreground/80"
           >
             <code>{notice.command}</code>

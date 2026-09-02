@@ -266,16 +266,21 @@ const GROK: readonly AgentCommand[] = [
   { command: "/quit", description: "Quit the application", takesArg: false, argHint: "", common: false, dangerous: true },
 ];
 
-const CATALOG: Record<string, readonly AgentCommand[]> = {
-  claude: CLAUDE,
-  codex: CODEX,
-  pi: PI,
-  opencode: OPENCODE,
-  omp: OMP,
-  grok: GROK,
-  agy: AGY,
-  antigravity: AGY,
-};
+// A Map, not an object literal: the keys tested against it come from Herdr's agent string and from
+// what the operator typed in `commands.toml`, so an object lookup would answer for inherited names
+// ("constructor", "toString") that ship no catalog at all.
+const CATALOG = new Map<string, readonly AgentCommand[]>([
+  ["claude", CLAUDE],
+  ["codex", CODEX],
+  ["pi", PI],
+  ["opencode", OPENCODE],
+  ["omp", OMP],
+  ["grok", GROK],
+  // Herdr reports this agent under both names, and canonicalAgent() folds neither onto the other,
+  // so both keys are filed — one catalog, two spellings.
+  ["agy", AGY],
+  ["antigravity", AGY],
+]);
 
 /**
  * Commands for a Herdr-detected agent (`pane.agent`, e.g. "claude" / "codex") — the operator's own
@@ -323,10 +328,10 @@ export function commandsFor(
 }
 
 /** The agent names the shipped catalog is filed under — pinned against AGENT_FAMILIES in the tests. */
-export const CATALOG_AGENTS: readonly string[] = Object.keys(CATALOG);
+export const CATALOG_AGENTS: readonly string[] = [...CATALOG.keys()];
 
 function catalogFor(agent: string | undefined | null): readonly AgentCommand[] {
   if (!agent) return [];
   const key = canonicalAgent(agent.toLowerCase().trim());
-  return Object.hasOwn(CATALOG, key) ? CATALOG[key] : [];
+  return CATALOG.get(key) ?? [];
 }

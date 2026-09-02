@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useLoaderData, useNavigate, useParams, useRouteLoaderData } from "react-router";
+import { useLoaderData, useNavigate, useParams } from "react-router";
 import { ArrowUpToLine, ChevronDown, ChevronUp, Loader2, ScrollText, Search, X } from "lucide-react";
 
-import { AppHeader } from "@/components/app-header";
+import { RouteHeader } from "@/components/app-header";
 import { ChatMessageList, type ChatMessageListHandle } from "@/components/ui/chat/chat-message-list";
 import { FindBar } from "@/components/find-bar";
 import { TranscriptView } from "@/components/transcript-view";
 import { fetchHistory } from "@/lib/api";
-import { HISTORY_PAGE_SIZE, ROOT_ROUTE_ID, type HistoryData, type HomeData } from "@/lib/loaders";
+import { HISTORY_PAGE_SIZE, type HistoryData } from "@/lib/loaders";
+import { useMuxCapability } from "@/lib/mux-capability";
 import { panePath } from "@/lib/nav";
 import { setStatus } from "@/lib/status";
 import { matchingEntries, step, userTurnIndices } from "@/lib/transcript-search";
 import type { TranscriptEntry } from "@/lib/types";
+import { useRootData } from "@/lib/route-data";
+import { t } from "@/lib/i18n";
+import { useLocale } from "@/hooks/use-locale";
 
 // Pane history route — the agent's own transcript, which is the ONLY conversation history a Claude
 // pane can have. Its terminal runs on the alternate screen, so Herdr retains no scrollback ring at
@@ -27,13 +31,16 @@ import type { TranscriptEntry } from "@/lib/types";
 // The loader is deliberately not revalidated (`shouldRevalidate: false` in router.tsx), so the 1.5 s
 // poll never re-pulls a several-hundred-turn transcript out from under the reader.
 
-/** Why the strip is empty, in the user's terms. Each is an ordinary state, not an error. */
-const UNAVAILABLE_COPY: Record<NonNullable<HistoryData["unavailable"]>, string> = {
-  disabled: "Transcript history is switched off on this bridge (COLLIE_TRANSCRIPT).",
-  "no-session": "This pane has no agent session, so there's no transcript to read.",
-  "no-log": "No transcript file was found for this pane's session yet.",
-  error: "Couldn't read the transcript. Pull back and try again.",
-};
+/** Why the strip is empty, in the user's terms. Each is an ordinary state, not an error. Called
+ *  fresh at render time (not a module-level const) so a language switch picks up the new copy. */
+function unavailableCopy() {
+  return {
+    disabled: t("history.unavailable.disabled"),
+    "no-session": t("history.unavailable.noSession"),
+    "no-log": t("history.unavailable.noLog"),
+    error: t("history.unavailable.error"),
+  } satisfies Record<NonNullable<HistoryData["unavailable"]>, string>;
+}
 
 /** Turns rendered on open — a few screens, so first paint stays instant on the longest threads. */
 const INITIAL_RENDER = 60;
@@ -43,11 +50,17 @@ const RENDER_STEP = 120;
 const GROW_THRESHOLD = 800;
 
 export function HistoryRoute() {
+  // SAFETY: this is the `/pane/:paneId/history` route's element and `historyLoader` returns
+  // `HistoryData`; React Router types a data-mode `useLoaderData()` as `unknown`.
   const data = useLoaderData() as HistoryData;
-  const root = useRouteLoaderData(ROOT_ROUTE_ID) as HomeData;
+  useLocale();
+  const root = useRootData();
   const { paneId = "" } = useParams();
   const navigate = useNavigate();
-  const session = data.session;
+  // Whether an agent session log can exist here at all — a property of the multiplexer, not of this
+  // pane. See the empty-state branch below for what it changes.
+  const sessionLog = useMuxCapability("agentSessionRef");
+  const scope = data.scope;
 
   const agent =
     root.agents.find((a) => a.paneId === paneId) ??
@@ -98,7 +111,7 @@ export function HistoryRoute() {
     captureAnchor();
     setLoading(true);
     try {
-      const res = await fetchHistory(paneId, { limit: HISTORY_PAGE_SIZE, before: oldest }, session);
+      const res = await fetchHistory(paneId, { limit: HISTORY_PAGE_SIZE, before: oldest }, scope);
       if (!res.available) {
         setHasMore(false);
         return;
@@ -107,11 +120,11 @@ export function HistoryRoute() {
       setRenderCount((c) => c + res.entries.length); // keep the newly-fetched turns visible
       setHasMore(res.hasMore);
     } catch {
-      setStatus("Couldn't load older history", "error");
+      setStatus(t("history.loadOlderFailed"), "error");
     } finally {
       setLoading(false);
     }
-  }, [entries, hasMore, loading, paneId, session]);
+  }, [entries, hasMore, loading, paneId, scope]);
 
   /** Reveal more of what we already hold; only hit the network once nothing is left in memory. */
   const growUpward = useCallback(() => {
@@ -186,10 +199,8 @@ export function HistoryRoute() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <AppHeader
-        bridge={root.bridge}
-        error={root.error}
-        onHome={() => navigate(panePath(paneId, session))}
+      <RouteHeader
+        onHome={() => navigate(panePath(paneId, scope))}
         override={
           findOpen ? (
             <FindBar
@@ -200,7 +211,7 @@ export function HistoryRoute() {
               onPrev={() => jumpTo(step(matches, cursor, -1))}
               onNext={() => jumpTo(step(matches, cursor, 1))}
               onClose={closeFind}
-              subject="history"
+              subject={t("find.subject.history")}
             />
           ) : undefined
         }
@@ -210,7 +221,7 @@ export function HistoryRoute() {
             <button
               type="button"
               onClick={() => setFindOpen(true)}
-              aria-label="Find in history"
+              aria-label={t("history.findAria")}
               className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors active:bg-muted/60"
             >
               <Search className="size-4" />
@@ -228,8 +239,8 @@ export function HistoryRoute() {
         rightTrail={
           <button
             type="button"
-            onClick={() => navigate(panePath(paneId, session))}
-            aria-label="Close history"
+            onClick={() => navigate(panePath(paneId, scope))}
+            aria-label={t("history.closeAria")}
             className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors active:bg-muted/60"
           >
             <X className="size-4" />
@@ -239,17 +250,25 @@ export function HistoryRoute() {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <ScrollText className="size-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate font-semibold leading-tight">History</span>
+            <span className="truncate font-semibold leading-tight">{t("history.title")}</span>
           </div>
           <div className="truncate text-xs leading-tight text-muted-foreground">{title}</div>
         </div>
-      </AppHeader>
+      </RouteHeader>
 
       <div className="relative min-h-0 min-w-0 flex-1">
         <ChatMessageList ref={listRef} className="px-3 py-3">
           {entries.length === 0 ? (
-            <div className="px-2 py-16 text-center text-sm text-muted-foreground">
-              {UNAVAILABLE_COPY[data.unavailable ?? "no-log"]}
+            <div className="px-2 py-16 text-center text-sm leading-relaxed text-muted-foreground">
+              {/* The route is reachable by URL — a bookmark, a back button, an older cached bundle
+                  whose entry points had not yet learned to hide. So it EXPLAINS rather than 404s
+                  (M10/06). When the multiplexer keeps no agent session log at all, its own words
+                  replace the generic per-pane copy: "this pane has no agent session" is true but
+                  reads as something the operator could fix by starting an agent, which here they
+                  cannot. Empty on Herdr, so this is exactly today's copy there. */}
+              {sessionLog.capable || sessionLog.note === ""
+                ? unavailableCopy()[data.unavailable ?? "no-log"]
+                : sessionLog.note}
             </div>
           ) : (
             <>
@@ -267,13 +286,11 @@ export function HistoryRoute() {
                   ) : (
                     <ArrowUpToLine className="size-3.5" />
                   )}
-                  {loading ? "Loading…" : "Load older"}
+                  {loading ? t("history.loading") : t("history.loadOlder")}
                 </button>
               ) : (
                 <div className="mb-3 text-center text-[11px] text-muted-foreground">
-                  {data.fileTruncated
-                    ? "Start of the readable transcript (the log was clipped at the read cap)"
-                    : "Start of the conversation"}
+                  {data.fileTruncated ? t("history.startClipped") : t("history.startOfConversation")}
                 </div>
               )}
               <TranscriptView
@@ -290,11 +307,11 @@ export function HistoryRoute() {
             (20 human turns in 900 is typical). Bottom-right so it's thumb-reachable and clear of the
             centred "scroll to latest" button. Hidden while find is open, which owns prev/next then. */}
         {userTurns.length > 1 && !findOpen && (
-          <div className="absolute bottom-3 right-3 z-10 flex flex-col overflow-hidden rounded-full border bg-background/90 shadow-md backdrop-blur">
+          <div className="absolute bottom-3 right-3 z-10 flex flex-col overflow-hidden rounded-md border bg-background/90 shadow-md backdrop-blur">
             <button
               type="button"
               onClick={() => jumpTo(step(userTurns, cursor, -1))}
-              aria-label="Previous message you sent"
+              aria-label={t("history.prevMessageAria")}
               className="flex size-9 items-center justify-center text-muted-foreground transition-colors active:bg-muted"
             >
               <ChevronUp className="size-4" />
@@ -302,7 +319,7 @@ export function HistoryRoute() {
             <button
               type="button"
               onClick={() => jumpTo(step(userTurns, cursor, 1))}
-              aria-label="Next message you sent"
+              aria-label={t("history.nextMessageAria")}
               className="flex size-9 items-center justify-center border-t text-muted-foreground transition-colors active:bg-muted"
             >
               <ChevronDown className="size-4" />

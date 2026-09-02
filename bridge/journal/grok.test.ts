@@ -111,8 +111,9 @@ describe("parseGrokTranscript", () => {
       kind: { tool_type: "web_search", action: { type: "search", query: "pi coding harness" } },
     });
     const [entry] = parseGrokTranscript(log);
-    expect(entry!.parts[0]).toMatchObject({ kind: "tool", name: "web_search" });
-    expect((entry!.parts[0] as { summary: string }).summary).toContain("pi coding harness");
+    const part = entry!.parts[0]!;
+    expect(part).toMatchObject({ kind: "tool", name: "web_search" });
+    expect(part.kind === "tool" ? part.summary : "").toContain("pi coding harness");
   });
 });
 

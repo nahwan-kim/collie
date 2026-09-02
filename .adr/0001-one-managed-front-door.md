@@ -3,6 +3,10 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Shipped in:** 0.16.0
+- **Amended in scope by:** [ADR 0013](./0013-a-peer-listens-without-becoming-a-front-door.md) — with
+  pack federation, "exactly one managed front door" is **per pack**, held by the lead; peers manage
+  none. Nothing below is retracted: the criterion, the funnel prohibition and the ownership rule all
+  stand as written and apply to the lead's door.
 - **Trail:** [PR #26](https://github.com/AltanS/collie/pull/26) (declined,
   [reasoning](https://github.com/AltanS/collie/pull/26#issuecomment-5085567630)) ·
   [PR #36](https://github.com/AltanS/collie/pull/36) (what we kept from it)
@@ -49,8 +53,8 @@ We own its lifecycle end to end — `collie-ctl.sh` publishes it, records the ma
 `<config-dir>/tailscale-managed-handler`, and only ever tears down a mapping still matching that
 record.
 
-**Every other tunnel is `COLLIE_SKIP_SERVE=1` plus [DEPLOYMENT.md Variant
-E](../DEPLOYMENT.md#variant-e--any-other-mesh-or-tunnel-netbird-zerotier-cloudflare-tunnel).** The
+**Every other tunnel is `COLLIE_SKIP_SERVE=1` plus [docs/deployment.md → Variant
+E](../docs/deployment.md#variant-e--any-other-mesh-or-tunnel-netbird-zerotier-cloudflare-tunnel).** The
 operator owns the ingress; Collie publishes nothing, supervises nothing, and tears down nothing.
 
 The criterion is not popularity or quality. It is: **we manage only what we run and can test.**

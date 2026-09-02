@@ -1,30 +1,43 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildSubscriptions, EventPoker, sameIdSet, type Subscription } from "./event-poker.ts";
-import type { HerdrClient } from "./herdr-client.ts";
+import { EventPoker, sameIdSet } from "./event-poker.ts";
+import { HerdrMux } from "./mux/herdr/adapter.ts";
+import { buildSubscriptions } from "./mux/herdr/events.ts";
+import type { HerdrClient } from "./mux/herdr/client.ts";
+import type { MuxAdapter } from "./mux/types.ts";
 
-// EventPoker owns the stream lifecycle (ack → healthy, events → debounced poke, down → backoff
+// EventPoker owns the watch lifecycle (ack → healthy, events → debounced poke, down → backoff
 // reconnect). The socket itself lives in HerdrClient.subscribeEvents and stays untested; here we
 // fake it so tests drive ack/event/down synchronously and assert the decisions.
+//
+// The poker talks the mux port, so the fake socket is wrapped in the REAL Herdr adapter: the
+// subscription list and the event→callback split are then exercised rather than restated.
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-interface FakeStream {
-  subscriptions: Subscription[];
-  onUp: () => void;
-  onEvent: (event: string, data: unknown) => void;
-  onDown: (reason: string) => void;
+/**
+ * HerdrClient carries private socket fields, so no fake can ever *be* one structurally.
+ * `Partial<HerdrClient>` keeps `subscribeEvents` checked against the real signature; only the "the
+ * rest is never reached" step is asserted.
+ */
+function asMux(fake: Partial<HerdrClient>): MuxAdapter {
+  // SAFETY: a watch calls nothing on its client but `subscribeEvents`, which FakeClient implements;
+  // no other member is reachable from the poker's code paths.
+  return new HerdrMux(fake as HerdrClient);
+}
+
+// Derived from the real client rather than restated, so a change to the subscription contract shows
+// up here as a typecheck failure instead of a fake that silently drifts out of shape.
+type SubscribeOpts = Parameters<HerdrClient["subscribeEvents"]>[0];
+type EventStream = ReturnType<HerdrClient["subscribeEvents"]>;
+
+interface FakeStream extends SubscribeOpts {
   closed: boolean;
 }
 
 class FakeClient {
   readonly streams: FakeStream[] = [];
-  subscribeEvents(opts: {
-    subscriptions: Subscription[];
-    onUp: () => void;
-    onEvent: (event: string, data: unknown) => void;
-    onDown: (reason: string) => void;
-  }): { close(): void } {
+  subscribeEvents(opts: SubscribeOpts): EventStream {
     const stream: FakeStream = { ...opts, closed: false };
     this.streams.push(stream);
     return {
@@ -44,7 +57,7 @@ class FakeClient {
 
 function makePoker(opts?: { debounceMs?: number; backoffMs?: number[] }) {
   const client = new FakeClient();
-  const poker = new EventPoker(client as unknown as HerdrClient, {
+  const poker = new EventPoker(asMux(client), {
     debounceMs: opts?.debounceMs ?? 10,
     backoffMs: opts?.backoffMs ?? [10, 20],
   });
@@ -92,6 +105,35 @@ describe("EventPoker — health", () => {
     expect(health).toEqual([true]);
     client.last.onDown("socket error");
     expect(health).toEqual([true, false]);
+    poker.stop();
+  });
+});
+
+describe("EventPoker — reconcile on coming up", () => {
+  test("the transition to healthy pokes once — the watch missed everything before it existed", async () => {
+    const { client, poker, pokes } = makePoker({ debounceMs: 10 });
+    poker.start();
+    expect(pokes.length).toBe(0); // subscribing is not yet knowing
+    client.last.onUp();
+    await sleep(25);
+    // Nothing "happened" — no event was delivered. The poke rides the transition itself, because a
+    // stream that was dark cannot have reported what changed while it was dark.
+    expect(pokes.length).toBe(1);
+    poker.stop();
+  });
+
+  test("a resubscribe while already healthy does not poke by itself", async () => {
+    const { client, poker, pokes } = makePoker({ debounceMs: 10 });
+    poker.start();
+    client.last.onUp();
+    await sleep(25);
+    expect(pokes.length).toBe(1);
+    // The herd changed, so the watch is re-scoped over a LIVE stream. That ack is not a recovery
+    // from darkness, and must not be paid for with a second reconcile.
+    poker.setAgentPanes(["w1:p1"]);
+    client.last.onUp();
+    await sleep(25);
+    expect(pokes.length).toBe(1);
     poker.stop();
   });
 });

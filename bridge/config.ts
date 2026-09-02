@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { AuditContent } from "./audit.ts";
 import type { DialMode } from "./dial.ts";
 import type { JournalRoots } from "./journal/registry.ts";
+import { DEFAULT_MUX, muxEndpointVar } from "./mux/registry.ts";
 
 // All bridge configuration, resolved once at startup. Env-driven so the systemd unit and the
 // plugin launcher can configure it without code changes. Defaults are safe for a single-user,
@@ -36,8 +37,8 @@ function envInt(
   return n;
 }
 
-function envList(name: string): string[] {
-  return (process.env[name] ?? "")
+function envList(name: string, env: Record<string, string | undefined> = process.env): string[] {
+  return (env[name] ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
@@ -51,16 +52,15 @@ function envList(name: string): string[] {
  * things on the two platforms this bridge supports. One path stays one path, so an existing value
  * parses to exactly what it always meant.
  */
-function envRoots(name: string, fallback: string): string[] {
-  const list = envList(name);
+function envRoots(
+  name: string,
+  fallback: string,
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const list = envList(name, env);
   return list.length > 0 ? list : [fallback];
 }
 
-/**
- * Read a boolean env var. Empty/unset → `fallback`. `off`/`0`/`false`/`no` → false; `on`/`1`/`true`/
- * `yes` → true (case-insensitive); anything else falls back with a warning. Used for feature toggles
- * that default on, where a typo silently flipping the feature would be surprising.
- */
 /**
  * Read an env var constrained to a fixed set of string values, falling back (with a warning) on
  * anything not in `allowed`. Empty/unset → `fallback`. Case-insensitive.
@@ -75,8 +75,20 @@ function envEnum<T extends string>(name: string, allowed: readonly T[], fallback
   return fallback;
 }
 
-function envBool(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
+/**
+ * Read a boolean env var. Empty/unset → `fallback`. `off`/`0`/`false`/`no` → false; `on`/`1`/`true`/
+ * `yes` → true (case-insensitive); anything else falls back with a warning.
+ *
+ * Exported so mode-scoped config (`bridge/pack/config.ts`) parses its env in exactly this style
+ * rather than growing a second, subtly different reader. The env source is a parameter so a caller
+ * can drive it purely; it defaults to `process.env`, which is how everything in this file reads.
+ */
+export function envBool(
+  name: string,
+  fallback: boolean,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const raw = env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   const v = raw.trim().toLowerCase();
   if (["off", "0", "false", "no"].includes(v)) return false;
@@ -86,6 +98,33 @@ function envBool(name: string, fallback: boolean): boolean {
 }
 
 export interface Config {
+  /**
+   * Which multiplexer this collie drives — a name in `bridge/mux/registry.ts`. `herdr` by default,
+   * so an existing deployment that sets nothing behaves exactly as it always has. Set via
+   * `COLLIE_MUX`; an unknown name refuses to start with the valid ones in the message (`createMux`).
+   */
+  mux: string;
+  /**
+   * Where that multiplexer lives, in the ADAPTER's own terms — opaque here, exactly as a
+   * `MuxTarget`'s endpoint is. Herdr reads {@link socketPath}; every other adapter reads its own
+   * `COLLIE_MUX_ENDPOINT_<NAME>` (`muxEndpointVar`), and an empty value means "the adapter's default":
+   * for tmux, tmux's own default server. Documented per adapter, never guessed here.
+   */
+  muxEndpoint: string;
+  /**
+   * Absolute path to the `tmux` binary, when the operator has one somewhere unusual. Empty (the
+   * default) probes a short list of fixed paths — never `PATH`, which a systemd unit and a Herdr
+   * plugin action do not share with the operator's shell (`bridge/mux/tmux/exec.ts`). Set via
+   * `COLLIE_TMUX_BIN`. Inert unless {@link mux} is `tmux`.
+   */
+  tmuxBin: string;
+  /**
+   * Absolute path to the `zellij` binary, when the operator has one somewhere unusual. Empty (the
+   * default) probes fixed paths — `~/.local/bin` first, because that is where zellij's own installer
+   * puts it — and never `PATH` (`bridge/mux/zellij/exec.ts`). Set via `COLLIE_ZELLIJ_BIN`. Inert
+   * unless {@link mux} is `zellij`.
+   */
+  zellijBin: string;
   /** Path to Herdr's control socket. A non-Herdr-launched daemon must discover this itself. */
   socketPath: string;
   /**
@@ -162,6 +201,18 @@ export interface Config {
    */
   quickRepliesFile: string;
   /**
+   * Where the operator's UI typeface rows live — `theme.toml`, the fourth sibling in the same dir,
+   * read the same way (bridge/operator-fonts.ts) and likewise never read here. Named for a theme
+   * rather than for fonts so a colour block can join it without becoming a fifth operator file.
+   */
+  themeFile: string;
+  /**
+   * The directory `theme.toml`'s `file` names resolve inside — `fonts/`, beside the file that
+   * declares them, in the CONFIG dir. It is the containment ROOT for `GET /api/fonts/<basename>`,
+   * never a search path: a name that resolves outside it after symlinks is not served (ADR 0033).
+   */
+  fontsDir: string;
+  /**
    * Tailscale identity gate. If set under `tailscale serve`, the request must carry a matching
    * `Tailscale-User-Login` header. A mismatch is rejected. A missing header is also rejected —
    * serve injects none for tagged nodes, so tolerating it let any tagged node write. Under
@@ -234,9 +285,27 @@ export interface Config {
    * proxy (Caddy/Nginx) fronts the loopback bridge instead. The bridge itself handles every request
    * identically either way — this flag only informs the startup warnings: without `tailscale serve`
    * in front, the `Tailscale-User-Login` header is never injected, so {@link trustedUser} is inert
-   * and per-device auth ({@link deviceHeader}) becomes the way to gate writes (DEPLOYMENT.md → Variant C).
+   * and per-device auth ({@link deviceHeader}) becomes the way to gate writes (docs/deployment.md → Variant C).
    */
   skipServe: boolean;
+}
+
+/**
+ * The loopback port the bridge binds. Exported because the CLI writes it into the generated service
+ * unit and into `status` — one source of truth, so a default changed here can't leave the unit and
+ * the process disagreeing about where Collie is.
+ */
+export const DEFAULT_PORT = 8787;
+
+/**
+ * The address the bridge actually binds: an absent `COLLIE_HOST` resolves to loopback, anything set
+ * is used verbatim (empty string included — that's the wildcard-bind case `bindIsWildcard` names).
+ * Pure and exported for the same reason as {@link resolveStateDir}: `cli/doctor.ts`'s bind check and
+ * the `collie start`/`status` banner's readiness probe (`cli/lifecycle.ts`) both need the bridge's
+ * real bind from their own merged `.env`, not a re-derived guess that could drift from this one.
+ */
+export function resolveBridgeHost(env: Record<string, string | undefined> = process.env): string {
+  return env.COLLIE_HOST ?? "127.0.0.1";
 }
 
 /**
@@ -251,6 +320,37 @@ export function isLoopbackBindHost(host: string): boolean {
   if (h === "localhost") return true;
   if (h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * Why this bind must be refused, or `null` when it may stand. One sentence the operator can act on;
+ * the caller decides what to do with it.
+ *
+ * **The decision is not config's to take alone, which is why this is a predicate and not a throw.**
+ * Loopback is the trust basis for every browser-side write gate — the `Tailscale-User-Login` header,
+ * `COLLIE_DEVICE_HEADER` and the same-origin check are all client-settable, so on a wide bind they
+ * mean nothing. That is why a solo instance and a lead refuse to start. But a pack **peer** binds off
+ * loopback BY CONSTRUCTION: its lead dials it across a machine boundary, and the surface it exposes
+ * there is gated by pinned mutual TLS plus the pack secret rather than by any of those headers
+ * (PACK_PROTOCOL.md §3, [ADR 0013](../.adr/0013-a-peer-listens-without-becoming-a-front-door.md)).
+ * The mode that decides is not known until the trust store has been read, which happens after this
+ * function runs — so `bridge/index.ts` calls it once the mode is in hand.
+ *
+ * Pure and exported so both the refusal and its exemption are unit-tested without a listener.
+ */
+export function nonLoopbackBindRefusal(
+  cfg: Pick<Config, "host" | "allowNonLoopbackBind">,
+): string | null {
+  if (cfg.allowNonLoopbackBind || isLoopbackBindHost(cfg.host)) return null;
+  const shown = cfg.host.trim() === "" ? "(empty — every interface)" : cfg.host;
+  return (
+    `COLLIE_HOST=${shown} is not a loopback address. Collie binds loopback only: the ` +
+    `Tailscale-User-Login header, COLLIE_DEVICE_HEADER and the same-origin gate are all ` +
+    `client-settable and mean nothing on a wide bind, so binding here would hand write access ` +
+    `to anything that can reach the port. Use 127.0.0.1 (the default) and put your ingress in ` +
+    `front of it. If you truly mean to bind wide and have another control in front, set ` +
+    `COLLIE_ALLOW_NON_LOOPBACK_BIND=1.`
+  );
 }
 
 /**
@@ -270,38 +370,117 @@ export function defaultSocketPath(
   return join(home, ".config", "herdr", "herdr.sock");
 }
 
+/**
+ * Where runtime state lives: uploads, `audit.log`, `push-subscriptions.json`, `snooze.json` — and the
+ * pack trust store. Herdr's injected dir wins, then the explicit override, then the user state dir.
+ *
+ * Pure and exported because the CLI resolves the same directory from its own `.env`-merged
+ * environment (`cli/context.ts`): the pack verbs write the trust store the bridge reads, so the two
+ * must land on the same path or an enrollment would be invisible to the running service. It names no
+ * key `loadConfig` did not already name — the solo baseline's env-key list is unchanged by it.
+ */
+export function resolveStateDir(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): string {
+  return env.HERDR_PLUGIN_STATE_DIR ?? env.COLLIE_STATE_DIR ?? join(home, ".local", "state", "collie");
+}
+
+/**
+ * Where each harness's journal lives, resolved from an environment and a home directory.
+ *
+ * A PARAMETER rather than a read of `process.env` and `homedir()`, so `collie doctor` can ask this
+ * one function the same question the bridge asks it (issue #137) instead of re-deriving five
+ * fallbacks that would drift. {@link loadConfig} calls it with the defaults, so the running bridge's
+ * roots are unchanged.
+ *
+ * **The home is the resolving PROCESS's home**, which is the whole reason `doctor` reports this: a
+ * bridge running as another user reads that user's `~/.claude/projects`, not the operator's.
+ */
+export function resolveJournalRoots(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): JournalRoots {
+  return {
+    // COLLIE_TRANSCRIPT_ROOT predates the per-harness split and meant Claude's root, so it keeps
+    // meaning exactly that — an existing deployment's env keeps working untouched. It takes SEVERAL
+    // roots (comma-separated) because `CLAUDE_CONFIG_DIR` gives each Claude profile its own
+    // projects tree, and a herd routinely mixes them (issue #92); one value is still one root.
+    claude: envRoots("COLLIE_TRANSCRIPT_ROOT", join(home, ".claude", "projects"), env),
+    // Each harness's own home var is honoured first, so relocating the agent relocates its journal
+    // without a second Collie setting to keep in sync. The Collie override takes a list too — the
+    // multi-home case isn't Claude's alone, and one setting shouldn't behave differently per agent.
+    codex: envRoots(
+      "COLLIE_CODEX_ROOT",
+      join(env.CODEX_HOME ?? join(home, ".codex"), "sessions"),
+      env,
+    ),
+    pi: envRoots(
+      "COLLIE_PI_ROOT",
+      join(env.PI_CODING_AGENT_DIR ?? join(home, ".pi", "agent"), "sessions"),
+      env,
+    ),
+    // OpenCode keeps one SQLite database at the top of its XDG data dir, not per-session files.
+    opencode: envRoots(
+      "COLLIE_OPENCODE_ROOT",
+      join(env.XDG_DATA_HOME ?? join(home, ".local", "share"), "opencode"),
+      env,
+    ),
+    grok: envRoots(
+      "COLLIE_GROK_ROOT",
+      join(env.GROK_HOME ?? join(home, ".grok"), "sessions"),
+      env,
+    ),
+  };
+}
+
+/**
+ * The operator's config dir — where their `.env` lives, their `commands.toml` beside it, and the
+ * `tailscale serve` ownership record beside that.
+ *
+ * Resolved exactly the way scripts/collie-ctl.sh resolves it MINUS the `herdr` shell-out: the
+ * launcher passes HERDR_PLUGIN_CONFIG_DIR into the unit (and the launchd plist) precisely so this
+ * process never has to ask the CLI, and the two entry points must not disagree about which dir that
+ * is. ~/.config/collie is the same last-resort default the shim ends on.
+ *
+ * Exported for the front-door teardown (`bridge/front-door.ts`), which must find the record file the
+ * CLI wrote. It names no key `loadConfig` did not already name.
+ */
+export function resolveConfigDir(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): string {
+  return env.HERDR_PLUGIN_CONFIG_DIR ?? join(home, ".config", "collie");
+}
+
 export function loadConfig(): Config {
-  const stateDir =
-    process.env.HERDR_PLUGIN_STATE_DIR ??
-    process.env.COLLIE_STATE_DIR ??
-    join(homedir(), ".local", "state", "collie");
+  const stateDir = resolveStateDir();
 
   const submitKeys = envList("COLLIE_SUBMIT_KEYS");
 
-  const host = process.env.COLLIE_HOST ?? "127.0.0.1";
+  const host = resolveBridgeHost();
   const allowNonLoopbackBind = envBool("COLLIE_ALLOW_NON_LOOPBACK_BIND", false);
-  if (!isLoopbackBindHost(host) && !allowNonLoopbackBind) {
-    throw new Error(
-      `COLLIE_HOST=${host} is not a loopback address. Collie binds loopback only: the ` +
-        `Tailscale-User-Login header, COLLIE_DEVICE_HEADER and the same-origin gate are all ` +
-        `client-settable and mean nothing on a wide bind, so binding here would hand write access ` +
-        `to anything that can reach the port. Use 127.0.0.1 (the default) and put your ingress in ` +
-        `front of it. If you truly mean to bind wide and have another control in front, set ` +
-        `COLLIE_ALLOW_NON_LOOPBACK_BIND=1.`,
-    );
-  }
 
   // The operator's config dir — where their `.env` lives, and now their `commands.toml` beside it.
   // Resolved exactly the way scripts/collie-ctl.sh resolves it MINUS the `herdr` shell-out: the
   // launcher passes HERDR_PLUGIN_CONFIG_DIR into the unit (and the launchd plist) precisely so this
   // process never has to ask the CLI, and the two entry points must not disagree about which dir
   // that is. ~/.config/collie is the same last-resort default the shim ends on.
-  const configDir = process.env.HERDR_PLUGIN_CONFIG_DIR ?? join(homedir(), ".config", "collie");
+  const configDir = resolveConfigDir();
+
+  const mux = (process.env.COLLIE_MUX ?? "").trim() || DEFAULT_MUX;
+  const socketPath = process.env.HERDR_SOCKET_PATH ?? defaultSocketPath();
 
   return {
-    socketPath: process.env.HERDR_SOCKET_PATH ?? defaultSocketPath(),
+    mux,
+    // Herdr's endpoint IS its socket path, so the default adapter keeps reading exactly the setting
+    // it always read and nothing about an existing deployment moves.
+    muxEndpoint: mux === DEFAULT_MUX ? socketPath : (process.env[muxEndpointVar(mux)] ?? "").trim(),
+    tmuxBin: (process.env.COLLIE_TMUX_BIN ?? "").trim(),
+    zellijBin: (process.env.COLLIE_ZELLIJ_BIN ?? "").trim(),
+    socketPath,
     dialMode: envEnum("COLLIE_HERDR_DIAL", ["auto", "net", "bun"] as const, "auto"),
-    port: envInt("COLLIE_PORT", 8787, { min: 1, max: 65535 }),
+    port: envInt("COLLIE_PORT", DEFAULT_PORT, { min: 1, max: 65535 }),
     host,
     allowNonLoopbackBind,
     pollMs: envInt("COLLIE_POLL_MS", 1500, { min: 250 }),
@@ -309,37 +488,13 @@ export function loadConfig(): Config {
     notifyDelayMs: envInt("COLLIE_NOTIFY_DELAY_MS", 30_000, { min: 0 }),
     readLines: envInt("COLLIE_READ_LINES", 200, { min: 1 }),
     transcript: envBool("COLLIE_TRANSCRIPT", true),
-    journalRoots: {
-      // COLLIE_TRANSCRIPT_ROOT predates the per-harness split and meant Claude's root, so it keeps
-      // meaning exactly that — an existing deployment's env keeps working untouched. It takes SEVERAL
-      // roots (comma-separated) because `CLAUDE_CONFIG_DIR` gives each Claude profile its own
-      // projects tree, and a herd routinely mixes them (issue #92); one value is still one root.
-      claude: envRoots("COLLIE_TRANSCRIPT_ROOT", join(homedir(), ".claude", "projects")),
-      // Each harness's own home var is honoured first, so relocating the agent relocates its journal
-      // without a second Collie setting to keep in sync. The Collie override takes a list too — the
-      // multi-home case isn't Claude's alone, and one setting shouldn't behave differently per agent.
-      codex: envRoots(
-        "COLLIE_CODEX_ROOT",
-        join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions"),
-      ),
-      pi: envRoots(
-        "COLLIE_PI_ROOT",
-        join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "sessions"),
-      ),
-      // OpenCode keeps one SQLite database at the top of its XDG data dir, not per-session files.
-      opencode: envRoots(
-        "COLLIE_OPENCODE_ROOT",
-        join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode"),
-      ),
-      grok: envRoots(
-        "COLLIE_GROK_ROOT",
-        join(process.env.GROK_HOME ?? join(homedir(), ".grok"), "sessions"),
-      ),
-    },
+    journalRoots: resolveJournalRoots(),
     submitKeys: submitKeys.length ? submitKeys : ["Enter"],
     commandsFile: join(configDir, "commands.toml"),
     keysFile: join(configDir, "keys.toml"),
     quickRepliesFile: join(configDir, "quick-replies.toml"),
+    themeFile: join(configDir, "theme.toml"),
+    fontsDir: join(configDir, "fonts"),
     trustedUser: process.env.COLLIE_TRUSTED_USER ?? "",
     trustedUserOptional: envBool("COLLIE_TRUSTED_USER_OPTIONAL", false),
     auditContent: envEnum("COLLIE_AUDIT_CONTENT", ["preview", "none"] as const, "preview"),

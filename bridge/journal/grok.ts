@@ -25,6 +25,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { JsonObject, JsonValue } from "../json.ts";
 import { containedRealpath, exists, loadTail, rootList, statFile } from "./files.ts";
 import { clamp, MAX_RESULT_CHARS, MAX_TEXT_CHARS, stripAnsi, summarizeToolInput } from "./text.ts";
 import type {
@@ -49,23 +50,27 @@ export function extractUserQuery(text: string): string | null {
   return inner === "" ? null : inner;
 }
 
-function contentText(content: unknown): string {
+/** Flatten a Grok content list (`{type,text}` blocks) into plain text. */
+function contentText(content: JsonValue | undefined): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
     .map((b) =>
-      b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string"
-        ? (b as { text: string }).text
+      b !== null && typeof b === "object" && !Array.isArray(b) && typeof b.text === "string"
+        ? b.text
         : "",
     )
     .filter(Boolean)
     .join("\n");
 }
 
-function parseArgs(raw: unknown): unknown {
+/** `arguments` arrives as a JSON string, not an object — parse before summarising. */
+function parseArgs(raw: JsonValue | undefined): JsonValue | undefined {
   if (typeof raw !== "string") return raw;
   try {
-    return JSON.parse(raw);
+    // SAFETY: `JSON.parse` output IS a JsonValue by construction — naming it keeps the summariser's
+    // field reads checked property accesses rather than further assertions.
+    return JSON.parse(raw) as JsonValue;
   } catch {
     return raw;
   }
@@ -80,17 +85,8 @@ function grokCursor(line: string, seen: Map<string, number>): string {
   return n === 0 ? `gk-${key}` : `gk-${key}-${n}`;
 }
 
-interface GrokRow {
-  type?: unknown;
-  content?: unknown;
-  prompt_index?: unknown;
-  synthetic_reason?: unknown;
-  id?: unknown;
-  summary?: unknown;
-  tool_calls?: unknown;
-  tool_call_id?: unknown;
-  kind?: unknown;
-}
+/** A `chat_history.jsonl` line, once JSON.parse has admitted it is an object at all. */
+type GrokRow = JsonObject;
 
 /**
  * Parse a Grok `chat_history.jsonl` into oldest-first turns. PURE — no fs, no clock.
@@ -111,12 +107,18 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
 
   for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
-    let row: GrokRow;
+    let parsed: JsonValue;
     try {
-      row = JSON.parse(line) as GrokRow;
+      // SAFETY: `JSON.parse` output IS a JsonValue by construction — naming it keeps every field
+      // read below a checked property access.
+      parsed = JSON.parse(line) as JsonValue;
     } catch {
       continue;
     }
+    // A line that parses to a scalar (or a bare `null`, which would THROW on `.type`) has no row
+    // shape — skip it exactly as an unparseable line is skipped.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const row: GrokRow = parsed;
     const type = row.type;
     const uuid =
       typeof row.id === "string" && row.id !== "" ? row.id : grokCursor(line, seen);
@@ -127,8 +129,8 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
       if (Array.isArray(summary)) {
         textOut = summary
           .map((s) =>
-            s && typeof s === "object" && typeof (s as { text?: unknown }).text === "string"
-              ? (s as { text: string }).text
+            s !== null && typeof s === "object" && !Array.isArray(s) && typeof s.text === "string"
+              ? s.text
               : "",
           )
           .filter(Boolean)
@@ -160,8 +162,8 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
       if (body.trim() !== "") parts.push({ kind: "text", ...clamp(body, MAX_TEXT_CHARS) });
       if (Array.isArray(row.tool_calls)) {
         for (const call of row.tool_calls) {
-          if (call === null || typeof call !== "object") continue;
-          const c = call as { id?: unknown; name?: unknown; arguments?: unknown };
+          if (call === null || typeof call !== "object" || Array.isArray(call)) continue;
+          const c: JsonObject = call;
           const part: Extract<TranscriptPart, { kind: "tool" }> = {
             kind: "tool",
             name: typeof c.name === "string" ? c.name : "tool",
@@ -180,10 +182,10 @@ export function parseGrokTranscript(text: string): TranscriptEntry[] {
       const kind = row.kind;
       let name = "tool";
       let summary = "";
-      if (kind && typeof kind === "object") {
-        const k = kind as { tool_type?: unknown; action?: unknown };
+      if (kind !== null && kind !== undefined && typeof kind === "object" && !Array.isArray(kind)) {
+        const k: JsonObject = kind;
         if (typeof k.tool_type === "string") name = k.tool_type;
-        if (k.action && typeof k.action === "object") {
+        if (k.action !== null && typeof k.action === "object") {
           summary = summarizeToolInput(k.action);
         }
       }

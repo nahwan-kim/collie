@@ -67,10 +67,23 @@ const MAX_STATUS_ROW_CHARS = 512;
 const MIN_STATUS_FIELDS = 2;
 const MAX_STATUS_FIELDS = 12;
 const STATUS_INDENT = "  ";
-const CONTROL_CHARS = /[\u0000-\u0008\u000a-\u001f\u007f]/;
 
 function codePointCount(text: string): number {
   return [...text].length;
+}
+
+/**
+ * A C0/DEL byte anywhere in the row. Scanned by code unit rather than matched by a pattern, the way
+ * links.ts cuts the same bytes out of an href. Tab is not one of them: Codex indents with it, and a
+ * row that carries one is still an ordinary row.
+ */
+function hasControlChar(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09) continue;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 /** A coloured, unemphasised field segment: the paint Codex gives every status field. */
@@ -93,7 +106,7 @@ function isDimSuffixFieldSegment(segment: AnsiSegment): boolean {
   if (!segment.text.startsWith(STATUS_SEPARATOR)) return false;
   const field = segment.text.slice(STATUS_SEPARATOR.length);
   if (field.length === 0 || field !== field.trim()) return false;
-  if (CONTROL_CHARS.test(field) || codePointCount(field) > MAX_STATUS_FIELD_CHARS) return false;
+  if (hasControlChar(field) || codePointCount(field) > MAX_STATUS_FIELD_CHARS) return false;
   if (segment.dim !== true) return false;
   return segment.fg === undefined && segment.bg === undefined && segment.bold !== true;
 }
@@ -133,7 +146,7 @@ function foldTrailingPadding(segments: AnsiSegment[]): AnsiSegment[] | null {
 function isStyledStatusRow(text: string, line: StyledLine): boolean {
   const rowText = rstrip(text);
   if (rstrip(lineText(line)) !== rowText) return false;
-  if (CONTROL_CHARS.test(rowText)) return false;
+  if (hasControlChar(rowText)) return false;
   if (codePointCount(rowText) > MAX_STATUS_ROW_CHARS) return false;
 
   const segments = foldTrailingPadding(line.segments);

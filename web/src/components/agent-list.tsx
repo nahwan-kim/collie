@@ -1,16 +1,24 @@
 import { ArrowDown, ArrowUp, Check, Inbox, WifiOff } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { clockTime } from "@/lib/format";
+import { useMuxCapability } from "@/lib/mux-capability";
 import { SectionHeader } from "@/components/section-header";
+import { ListGroup } from "@/components/ui/list-group";
 import { flipDir, sectionHeaderProps, triage, type RecentDir, type TriageKey } from "@/lib/triage";
 import type { AgentView, BridgeStatus } from "@/lib/types";
+import { paneRowKey } from "@/lib/hosts";
 import { AgentCard } from "./agent-card";
+import { t } from "@/lib/i18n";
+import { useLocale } from "@/hooks/use-locale";
 
 interface AgentListProps {
   agents: AgentView[];
   bridge?: BridgeStatus | undefined;
-  onOpen: (paneId: string) => void;
+  /**
+   * Open a row. Takes the PANE, not its id: `w1:p1` names a different terminal on every machine in a
+   * pack, and this list is one herd across all of them — an id alone cannot say which row was tapped.
+   */
+  onOpen: (pane: AgentView) => void;
   /** Which way Recent runs, and how to flip it. Omit to render Recent newest-first with no toggle. */
   recentDir?: RecentDir;
   onRecentDirChange?: (dir: RecentDir) => void;
@@ -57,6 +65,10 @@ export function AgentList({
   error = false,
   lastSeenAt,
 }: AgentListProps) {
+  useLocale();
+  // Whether the multiplexer can say which agent a pane holds. Read unconditionally — a hook cannot
+  // sit behind the early return below, and the answer is only consulted in the empty branch.
+  const agentDetection = useMuxCapability("agentDetection");
   if (agents.length === 0) {
     if (!emptyState) return null;
     // "No agents running." is a claim about the herd, and only the bridge can make it. A stale render
@@ -65,22 +77,33 @@ export function AgentList({
     // `bridge` is no help on its own: a cached snapshot still says "connected".
     if (error) {
       return (
-        <div className="flex flex-col items-center justify-center gap-3 py-24 text-muted-foreground">
+        <div className="flex flex-col items-center justify-center gap-3 px-4 py-24 text-muted-foreground">
           <WifiOff className="size-7" />
           <span className="text-sm">
             {lastSeenAt === undefined
-              ? "Disconnected"
-              : `Disconnected — last seen ${clockTime(lastSeenAt)}`}
+              ? t("home.empty.disconnected")
+              : t("home.empty.disconnectedAt", { time: clockTime(lastSeenAt) })}
           </span>
         </div>
       );
     }
     return (
-      <div className="flex flex-col items-center justify-center gap-3 py-24 text-muted-foreground">
+      <div className="flex flex-col items-center justify-center gap-3 px-4 py-24 text-muted-foreground">
         <Inbox className="size-7" />
         <span className="text-sm">
-          {bridge === "connected" ? "No agents running." : "Waiting for Herdr…"}
+          {bridge === "connected" ? t("home.empty.noAgents") : t("home.empty.waiting")}
         </span>
+        {/* PRESENTATION, not a gate (M10/06). Without `agentDetection` every pane arrives as a
+            shell with an unknown status, so this list is empty on a machine that may be running
+            plenty — and "No agents running." is then a claim the bridge cannot actually make. The
+            adapter's own sentence says why, and the second line says where the panes went, so the
+            dashboard reads as one coherent screen instead of an empty one. Renders nothing on a
+            multiplexer that reports agents, i.e. nothing on Herdr. */}
+        {bridge === "connected" && !agentDetection.capable && agentDetection.note !== "" && (
+          <p className="max-w-xs text-center text-xs leading-snug">
+            {agentDetection.note} {t("home.empty.panesHint")}
+          </p>
+        )}
       </div>
     );
   }
@@ -93,13 +116,13 @@ export function AgentList({
   const allClear = all.find((s) => s.key === "needs")!.agents.length === 0;
 
   return (
-    <div className="flex flex-col gap-5 px-3 py-4">
+    <div className="flex flex-col gap-5 px-4 py-4">
       {/* The product of the twenty-times-a-day glance. Rendered with presence, not as a caption:
           you should be able to resolve it one-handed at arm's length without focusing. */}
       {allClear && (
-        <p className="flex items-center gap-2 px-1 py-1 text-sm font-medium">
+        <p className="flex items-center gap-2 py-1 text-sm font-medium">
           <Check className="size-5 shrink-0 text-status-done" aria-hidden />
-          Nothing needs you
+          {t("home.allClear")}
         </p>
       )}
       {sections.map((s) => {
@@ -108,6 +131,23 @@ export function AgentList({
         const open = foldable ? recentOpen : true;
         const bodyId = `agent-section-${s.key}`;
         const age = AGE_BY_SECTION.get(s.key);
+        // statusStyle="dot": the section heading already says the status, so a pill on every row
+        // restates it and costs the width the title needs.
+        const rows = s.agents.map((a) => (
+          <AgentCard
+            // The FULL row identity, not the pane id — see `paneRowKey`. A pane id is unique only
+            // within one session on one machine, so a merged or widened list holds several rows that
+            // answer to `w1:p1`; keyed by the id alone React recycles one row's element for
+            // another's between polls, and the card you are looking at acquires a different row's
+            // `onClick`. On this list, that is a tap landing in another terminal.
+            key={paneRowKey(a)}
+            agent={a}
+            onClick={() => onOpen(a)}
+            statusStyle="dot"
+            density={ATTENTION.has(s.key) ? "card" : "row"}
+            {...(age ? { age } : {})}
+          />
+        ));
 
         return (
           <section key={s.key} className="flex flex-col gap-2">
@@ -123,31 +163,22 @@ export function AgentList({
                 ) : undefined
               }
             />
-            {open && (
-              <div
-                id={bodyId}
-                className={cn(
-                  "flex flex-col",
-                  // Cards mean "a human is required here", so only the attention sections get them.
-                  // The rest are flat rows divided by a hairline — which also gives the page a
-                  // second boundary cue, so section gaps aren't doing that job alone.
-                  ATTENTION.has(s.key) ? "gap-2" : "divide-y divide-border/60",
-                )}
-              >
-                {/* statusStyle="dot": the section heading already says the status, so a pill on
-                    every row restates it and costs the width the title needs. */}
-                {s.agents.map((a) => (
-                  <AgentCard
-                    key={a.paneId}
-                    agent={a}
-                    onClick={() => onOpen(a.paneId)}
-                    statusStyle="dot"
-                    density={ATTENTION.has(s.key) ? "card" : "row"}
-                    {...(age ? { age } : {})}
-                  />
-                ))}
-              </div>
-            )}
+            {/* Cards mean "a human is required here", so only the attention sections get them —
+                and an attention section is a GAP LIST: every row is already a bordered object, so
+                it gets NO group frame. Wrapping it would be a box inside a box. Do not "fix" this
+                to a ListGroup later.
+
+                Every other section is flat rows in ONE bordered group. The frame gives the run of
+                hairlines a first edge and a last edge for 2px, which is the whole of what the
+                mockups changed — the row itself is untouched. */}
+            {open &&
+              (ATTENTION.has(s.key) ? (
+                <div id={bodyId} className="flex flex-col gap-2">
+                  {rows}
+                </div>
+              ) : (
+                <ListGroup id={bodyId}>{rows}</ListGroup>
+              ))}
           </section>
         );
       })}
@@ -158,25 +189,22 @@ export function AgentList({
 // One tap flips the Recent order. Deliberately not a menu — the design offers a direction, not a
 // choice of sort keys. min-h-9 keeps it on the 36px touch floor.
 function SortToggle({ dir, onChange }: { dir: RecentDir; onChange: (dir: RecentDir) => void }) {
+  useLocale();
   const newest = dir === "newest";
   const Icon = newest ? ArrowDown : ArrowUp;
   return (
     <button
       type="button"
       onClick={() => onChange(flipDir(dir))}
-      aria-label={
-        newest
-          ? "Sorted by most recently used first — switch to oldest first"
-          : "Sorted by oldest first — switch to most recently used first"
-      }
+      aria-label={newest ? t("home.sort.aria.newest") : t("home.sort.aria.oldest")}
       // A bordered chip, not bare text: unstyled it read as an annotation ("sorted newest") rather
       // than something you can press. Fixed width so flipping it doesn't shift the header. No fill —
       // filled, it outweighed the heading it sits beside, which is backwards for a control that
       // reorders the section you care least about.
-      className="flex min-h-9 items-center justify-center gap-1 rounded-full border px-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-95"
+      className="flex min-h-9 items-center justify-center gap-1 rounded-md border px-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-95"
     >
       <Icon className="size-3.5" aria-hidden />
-      <span className="w-[3.25rem] text-left">{newest ? "Newest" : "Oldest"}</span>
+      <span className="w-[3.25rem] text-left">{newest ? t("home.sort.newest") : t("home.sort.oldest")}</span>
     </button>
   );
 }

@@ -24,15 +24,19 @@ export const VAPID_KEYS = [
   "COLLIE_VAPID_SUBJECT",
 ] as const;
 export type VapidKey = (typeof VAPID_KEYS)[number];
+export interface VapidKeyPair {
+  publicKey: string;
+  privateKey: string;
+}
 
 /**
  * A VAPID keypair, base64url, in the shape `web-push` and the browser's `applicationServerKey` both
  * expect: public = the uncompressed P-256 point, private = the 32-byte scalar.
  */
-export function generateVapidKeys(): { publicKey: string; privateKey: string } {
+export function generateVapidKeys(): VapidKeyPair {
   const pair = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  const pub = pair.publicKey.export({ format: "jwk" }) as { x?: string; y?: string };
-  const priv = pair.privateKey.export({ format: "jwk" }) as { d?: string };
+  const pub = pair.publicKey.export({ format: "jwk" });
+  const priv = pair.privateKey.export({ format: "jwk" });
   if (!pub.x || !pub.y || !priv.d) throw new Error("node:crypto returned an incomplete P-256 JWK");
   const x = Buffer.from(pub.x, "base64url");
   const y = Buffer.from(pub.y, "base64url");
@@ -148,8 +152,8 @@ if (import.meta.main) {
   let subject: string | undefined;
   try {
     subject = subjectArg === undefined ? undefined : validateSubject(subjectArg);
-  } catch (e) {
-    console.error(`✗ ${(e as Error).message}`);
+  } catch (error) {
+    console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
     process.exit(2);
   }
 
@@ -208,8 +212,8 @@ if (import.meta.main) {
   const tmp = `${envPath}.push-keys.tmp`;
   try {
     await writeFile(tmp, merged, { mode: 0o600, flag: "wx" });
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
     // Left behind by a run that died between write and rename. Say so and stop: deleting it blind is
     // how `wx` stops meaning anything, and it may hold the only copy of a key someone just generated.
     console.error(`✗ ${tmp} already exists — a previous run left it behind.\n  Inspect it, then remove it and retry.`);

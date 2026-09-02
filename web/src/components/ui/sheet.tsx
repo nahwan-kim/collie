@@ -3,6 +3,8 @@ import { X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { t as translate } from "@/lib/i18n";
+import { useLocale } from "@/hooks/use-locale";
 
 // Minimal modal focus handling (no deps, no full trap): on open move focus into the panel so
 // keyboard / screen-reader users land inside the dialog; on close restore focus to whatever was
@@ -10,6 +12,9 @@ import { Button } from "@/components/ui/button";
 function useDialogFocus(open: boolean, panelRef: React.RefObject<HTMLElement | null>) {
   React.useEffect(() => {
     if (!open) return;
+    // SAFETY: `document.activeElement` is typed `Element | null`; the only thing read off it below
+    // is the optional `focus()`, which is what makes it an HTMLElement in practice. The optional
+    // call is what covers the case where it isn't one (an SVG element, say).
     const previouslyFocused = document.activeElement as HTMLElement | null;
     panelRef.current?.focus();
     return () => {
@@ -23,12 +28,21 @@ function useDialogFocus(open: boolean, panelRef: React.RefObject<HTMLElement | n
 interface BottomSheetProps {
   open: boolean;
   onClose: () => void;
-  title?: string;
+  /**
+   * A string everywhere except PaneActionsSheet, which composes the pane name with a `HostChip`
+   * (the "which machine" disambiguator) on the same row — so this is `ReactNode`, not `string`.
+   * Every other caller already passes a plain translated string, which is a `ReactNode` too, so
+   * widening this cost them nothing. The `title ? … : undefined` id-linking below still works
+   * because a non-empty node is truthy and the only falsy `ReactNode`s a caller passes here are
+   * `undefined` and `""`, both "no title".
+   */
+  title?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
 }
 
 export function BottomSheet({ open, onClose, title, children, className }: BottomSheetProps) {
+  useLocale();
   const panelRef = React.useRef<HTMLDivElement>(null);
   const drag = React.useRef({ startY: 0, atTop: false, engaged: false, dy: 0 });
   const [dragY, setDragY] = React.useState(0);
@@ -140,26 +154,48 @@ export function BottomSheet({ open, onClose, title, children, className }: Botto
           transition: drag.current.engaged ? "none" : "transform 0.2s ease-out",
         }}
         className={cn(
-          "relative z-10 max-h-[82dvh] w-full overflow-y-auto overscroll-contain rounded-t-2xl border-t border-border bg-background shadow-2xl duration-200 animate-in slide-in-from-bottom",
+          // `rounded-t-md` (2px), not `rounded-t-2xl`: 16px was the roundest corner left in the app and it
+          // sat on the most-seen surface. The sheet is a panel, and a panel has an edge.
+          //
+          // THE GROUND IS `--card`, NOT `--background`, and the edge is `--rule`. A sheet is a raised
+          // surface over the page, which is the one thing --card is for — and on --background it was
+          // the SAME value as the page it floats over. In dark that is the app's worst case: the page
+          // is oklch(0.145), the scrim behind the panel only darkens it further, and the panel's only
+          // separation was a --border hairline at 1.26:1. The operator's report was that the drawer
+          // was hard to make out at all. --card is oklch(0.205), a real step up, so the panel reads
+          // as raised rather than as a hole; --rule (2.06:1 dark) then draws the edge, because this
+          // is a cut between two REGIONS and not a component's own outline (DESIGN.md §4). Light
+          // gains the same separation for free: white on rgb(245) instead of rgb(245) on rgb(245).
+          "relative z-10 max-h-[82dvh] w-full overflow-y-auto overscroll-contain rounded-t-md border-t border-rule bg-card shadow-2xl duration-200 animate-in slide-in-from-bottom",
           "pb-[calc(env(safe-area-inset-bottom)_+_1rem)]",
           className,
         )}
       >
-        <div className="sticky top-0 z-10 border-b border-border/60 bg-background/95 backdrop-blur-md">
+        <div className="sticky top-0 z-10 border-b border-rule bg-card/95 backdrop-blur-md">
           {/* Grab handle — pull down (from anywhere at the top) to dismiss. */}
           <div className="flex justify-center pt-2 pb-1">
-            <span className="h-1 w-9 rounded-full bg-muted-foreground/40" />
+            {/* 4px tall, 36px wide — a stadium, so it takes the house 2px rather than full-round. */}
+            <span className="h-1 w-9 rounded-md bg-muted-foreground/40" />
           </div>
-          <div className="flex items-center justify-between px-4 pb-3">
-            <span id={title ? titleId : undefined} className="text-sm font-semibold">
+          <div data-slot="sheet-title-row" className="flex items-center justify-between px-4 pb-3">
+            <span
+              id={title ? titleId : undefined}
+              data-slot="sheet-title"
+              // `flex min-w-0 flex-1 items-center gap-1.5`: harmless for the plain-string title
+              // every caller but PaneActionsSheet passes (a lone text child in a flex box still
+              // renders as one line) and is what lets THAT caller's composed node — the pane name
+              // plus a `HostChip` — share the row and shrink into it instead of overflowing past
+              // the close button.
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold"
+            >
               {title}
             </span>
             <Button
               variant="ghost"
               size="icon"
-              className="size-8"
+              className="size-8 shrink-0"
               onClick={onClose}
-              aria-label="Close"
+              aria-label={translate("common.closeAria")}
             >
               <X className="size-4" />
             </Button>
@@ -193,6 +229,7 @@ export function SideSheet({
   footer,
   className,
 }: SideSheetProps) {
+  useLocale();
   const panelRef = React.useRef<HTMLDivElement>(null);
   const titleId = React.useId();
   useDialogFocus(open, panelRef);
@@ -231,11 +268,13 @@ export function SideSheet({
         ref={panelRef}
         tabIndex={-1}
         className={cn(
-          "relative z-10 flex h-full w-[86%] max-w-sm flex-col border-r border-border bg-background shadow-2xl duration-200 animate-in slide-in-from-left",
+          // Same ground and same edge as the bottom sheet above, for the same reason — one panel
+          // surface app-wide, raised off the page rather than painted in the page's own colour.
+          "relative z-10 flex h-full w-[86%] max-w-sm flex-col border-r border-rule bg-card shadow-2xl duration-200 animate-in slide-in-from-left",
           className,
         )}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-border/60 bg-background/95 px-4 py-3 backdrop-blur-md [padding-top:calc(env(safe-area-inset-top)_+_0.75rem)]">
+        <div className="flex shrink-0 items-center justify-between border-b border-rule bg-card/95 px-4 py-3 backdrop-blur-md [padding-top:calc(env(safe-area-inset-top)_+_0.75rem)]">
           <span id={title ? titleId : undefined} className="text-sm font-semibold">
             {title}
           </span>
@@ -246,7 +285,7 @@ export function SideSheet({
               size="icon"
               className="size-8"
               onClick={onClose}
-              aria-label="Close"
+              aria-label={translate("common.closeAria")}
             >
               <X className="size-4" />
             </Button>
@@ -254,7 +293,7 @@ export function SideSheet({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
         {footer && (
-          <div className="shrink-0 border-t border-border/60 px-3 py-2 pb-[calc(env(safe-area-inset-bottom)_+_0.5rem)]">
+          <div className="shrink-0 border-t border-rule px-3 py-2 pb-[calc(env(safe-area-inset-bottom)_+_0.5rem)]">
             {footer}
           </div>
         )}

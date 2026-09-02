@@ -1,7 +1,14 @@
 import { http, HttpResponse } from "msw";
 
+import { paneScopeKey, scopeKey } from "@/lib/scope";
 import { server } from "@/test/setup";
-import { fixtureAgents, fixtureSnapshot, paneTextWithDraft } from "@/test/handlers";
+import {
+  fixtureAgents,
+  fixturePackSnapshot,
+  fixturePackStatus,
+  fixtureSnapshot,
+  paneTextWithDraft,
+} from "@/test/handlers";
 
 // loaders.ts keeps a module-level "last good" cache, so each test re-imports the module fresh
 // (via vi.resetModules) to start from an empty cache and stay independent of run order.
@@ -236,7 +243,7 @@ describe("loaders — session scoping", () => {
     const { rootLoader } = await import("./loaders");
     const data = await rootLoader({ request: new Request("http://localhost/?s=collie-demo") });
     expect(captured).toBe("collie-demo");
-    expect(data.session).toBe("collie-demo");
+    expect(data.scope).toEqual({ host: undefined, session: "collie-demo" });
     expect(data.sessions).toHaveLength(2);
   });
 
@@ -251,7 +258,7 @@ describe("loaders — session scoping", () => {
     const { rootLoader } = await import("./loaders");
     const data = await rootLoader({ request: new Request("http://localhost/") });
     expect(captured).toBeNull();
-    expect(data.session).toBeUndefined();
+    expect(data.scope).toEqual({ host: undefined, session: undefined });
   });
 
   it("paneLoader threads the session through to the pane read", async () => {
@@ -268,7 +275,7 @@ describe("loaders — session scoping", () => {
       request: new Request("http://localhost/?s=collie-demo"),
     });
     expect(captured).toBe("collie-demo");
-    expect(data.session).toBe("collie-demo");
+    expect(data.scope).toEqual({ host: undefined, session: "collie-demo" });
   });
 
   it("keeps a per-session stale cache — a failed refresh in one session shows no other's herd", async () => {
@@ -279,16 +286,289 @@ describe("loaders — session scoping", () => {
     const stale = await rootLoader({ request: new Request("http://localhost/?s=collie-demo") });
 
     expect(stale.error).toBe(true);
-    expect(stale.session).toBe("collie-demo");
+    expect(stale.scope).toEqual({ host: undefined, session: "collie-demo" });
     expect(stale.agents).toEqual([]); // NOT the primary session's cached herd
     expect(stale.bridge).toBeUndefined();
   });
 
-  it("tracks requested scrollback per (session, pane) so ids can't collide across sessions", async () => {
+  it("tracks requested scrollback per (host, session, pane) so ids can't collide", async () => {
     const { getRequestedLines, growRequestedLines } = await import("./loaders");
-    growRequestedLines("w1:p1", "collie-demo");
-    expect(getRequestedLines("w1:p1", "collie-demo")).toBe(1000);
-    expect(getRequestedLines("w1:p1")).toBe(600); // the primary session's same id is untouched
+    growRequestedLines("w1:p1", { session: "collie-demo" });
+    expect(getRequestedLines("w1:p1", { session: "collie-demo" })).toBe(1000);
+    expect(getRequestedLines("w1:p1")).toBe(600); // the lead's primary session, same id, untouched
+    growRequestedLines("w1:p1", { host: "badger" });
+    expect(getRequestedLines("w1:p1", { host: "badger" })).toBe(1000);
+    expect(getRequestedLines("w1:p1")).toBe(600); // still untouched — a different machine entirely
+    expect(getRequestedLines("w1:p1", { host: "badger", session: "collie-demo" })).toBe(600);
+  });
+
+  // The host dimension, end to end through a loader: the wire param, the per-scope stale cache, and
+  // the nav-vs-revalidate classification a host switch must get for free (the URL changed).
+  it("hands back a referentially STABLE scope across revalidations", async () => {
+    const { rootLoader } = await import("./loaders");
+    const a = await rootLoader({ request: new Request("http://localhost/?h=badger&s=demo") });
+    const b = await rootLoader({ request: new Request("http://localhost/?h=badger&s=demo") });
+    // Identity, not just equality: `data.scope` replaces a plain string in React dep arrays.
+    expect(a.scope).toBe(b.scope);
+    const lead = await rootLoader({ request: new Request("http://localhost/") });
+    expect(lead.scope).not.toBe(a.scope);
+  });
+
+  it("rootLoader reads ?h= off the URL and sends it as host=", async () => {
+    let captured: { host: string | null; session: string | null } | undefined;
+    server.use(
+      http.get("/api/snapshot", ({ request }) => {
+        const q = new URL(request.url).searchParams;
+        captured = { host: q.get("host"), session: q.get("session") };
+        return HttpResponse.json(fixtureSnapshot);
+      }),
+    );
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader({ request: new Request("http://localhost/?h=badger&s=collie-demo") });
+    expect(captured).toEqual({ host: "badger", session: "collie-demo" });
+    expect(data.scope).toEqual({ host: "badger", session: "collie-demo" });
+  });
+
+  it("keeps the stale snapshot cache per HOST — one machine's failure shows no other's herd", async () => {
+    const { rootLoader } = await import("./loaders");
+    await rootLoader({ request: new Request("http://localhost/") }); // prime the lead
+
+    failSnapshot();
+    const stale = await rootLoader({ request: new Request("http://localhost/?h=badger") });
+
+    expect(stale.error).toBe(true);
+    expect(stale.scope).toEqual({ host: "badger", session: undefined });
+    expect(stale.agents).toEqual([]); // NOT the lead's cached herd
+  });
+
+  it("paneLoader keys its stale text per host — no cross-host mirror bleed", async () => {
+    server.use(
+      http.get(/\/api\/pane\/[^/]+$/, ({ request }) => {
+        const host = new URL(request.url).searchParams.get("host");
+        return HttpResponse.json({
+          paneId: "w1:p1",
+          text: host ? `on ${host}` : "on the lead",
+          truncated: false,
+          revision: 1,
+        });
+      }),
+    );
+    const { paneLoader } = await import("./loaders");
+    const lead = await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1%3Ap1"),
+    });
+    const peer = await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1%3Ap1?h=badger"),
+    });
+    expect(lead.text).toBe("on the lead");
+    expect(peer.text).toBe("on badger");
+
+    // Now fail every read: each scope must fall back to ITS OWN last-known text, not the other's.
+    server.use(http.get(/\/api\/pane\/[^/]+$/, () => new HttpResponse(null, { status: 500 })));
+    const leadStale = await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1%3Ap1?stale=1"),
+    });
+    const peerStale = await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1%3Ap1?h=badger&stale=1"),
+    });
+    expect(leadStale.text).toBe("on the lead");
+    expect(peerStale.text).toBe("on badger");
+  });
+});
+
+// A PWA must navigate INSTANTLY to last-known data while offline. During a KNOWN, escalated outage
+// (the shared connection-health store has latched "lost"), a NAVIGATION (loader run at a NEW url) skips
+// the doomed fetch and returns cache immediately (flagged error); a REVALIDATION (same url — the poll)
+// still really fetches, so recovery is discovered and the stale data swapped out. connection-health is
+// imported AFTER vi.resetModules() alongside loaders so both share one fresh module instance (the latch
+// the test sets is the one the loader reads).
+describe("loaders — offline navigation fast path", () => {
+  it("a navigation during a known outage returns the cached snapshot INSTANTLY (error, no fetch)", async () => {
+    const { rootLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+
+    await rootLoader({ request: new Request("http://localhost/") }); // prime the last-good snapshot
+    latchLost(); // escalated outage
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    // Different url ⇒ navigation ⇒ fast path: cache returned without touching the network.
+    const data = await rootLoader({ request: new Request("http://localhost/space/w1") });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(data.error).toBe(true); // flagged stale
+    expect(data.bridge).toBe("connected"); // last-known herd
+    expect(data.agents).toHaveLength(2);
+  });
+
+  it("keeps the last auth classification on the navigation fast path", async () => {
+    rejectSnapshot(401);
+    const { rootLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+
+    const rejected = await rootLoader({ request: new Request("http://localhost/") });
+    expect(rejected.authError).toBe(true);
+    latchLost();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const data = await rootLoader({ request: new Request("http://localhost/space/w1") });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(data.error).toBe(true);
+    expect(data.authError).toBe(true);
+  });
+
+  // Free consequence of putting the host in the URL: a host switch changes the URL, so the existing
+  // full-URL compare already classifies it as a NAVIGATION. No special case, no flag — the offline
+  // fast path is correct for it the day the dimension ships.
+  it("a HOST switch reads as a navigation, not a revalidation", async () => {
+    const { rootLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+
+    await rootLoader({ request: new Request("http://localhost/") }); // prime + set lastRootUrl
+    latchLost();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    // Same path, different host ⇒ a different url ⇒ navigation ⇒ fast path, no network.
+    const data = await rootLoader({ request: new Request("http://localhost/?h=badger") });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(data.error).toBe(true);
+    expect(data.scope).toEqual({ host: "badger", session: undefined });
+    // ...and it is that HOST's cache that was consulted, which is empty — never the lead's herd.
+    expect(data.agents).toEqual([]);
+  });
+
+  it("a revalidation (same url) still really fetches while latched — polls keep probing", async () => {
+    const { rootLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+
+    await rootLoader({ request: new Request("http://localhost/") }); // sets lastRootUrl = "/"
+    latchLost();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await rootLoader({ request: new Request("http://localhost/") }); // same url ⇒ revalidation
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("recovery: the next successful revalidation clears the latch and returns fresh, live data", async () => {
+    const { rootLoader } = await import("./loaders");
+    const { latchLost, isLostLatched } = await import("./connection-health");
+
+    await rootLoader({ request: new Request("http://localhost/") });
+    latchLost();
+    expect(isLostLatched()).toBe(true);
+
+    const data = await rootLoader({ request: new Request("http://localhost/") }); // lands (MSW success)
+    expect(data.error).toBe(false);
+    expect(isLostLatched()).toBe(false); // markLive cleared the latch
+  });
+
+  it("navigating to an UNVISITED pane during an outage returns a degraded pane INSTANTLY (no fetch)", async () => {
+    const { paneLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+    latchLost();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const data = await paneLoader({
+      params: { paneId: "wX:p9" },
+      request: new Request("http://localhost/pane/wX:p9"),
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(data.error).toBe(true);
+    expect(data.text).toBe(""); // never fetched → empty mirror, but instant (no 10s hang)
+    expect(data.revision).toBe(0);
+  });
+
+  it("returning to a PREVIOUSLY-VISITED pane during an outage shows its stale mirror INSTANTLY", async () => {
+    const { rootLoader, paneLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+
+    // Visit the pane (healthy) so its text is cached, then leave to the dashboard — rootLoader clears
+    // the pane discriminator so a RETURN reads as a fresh navigation, not a poll.
+    await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1:p1"),
+    });
+    await rootLoader({ request: new Request("http://localhost/") });
+
+    latchLost();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const data = await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1:p1"),
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(data.error).toBe(true);
+    expect(data.text).toBe(paneTextWithDraft()); // the stale mirror
+  });
+
+  // The notification-tap flow, end to end: the service worker builds the URL from the push payload
+  // (lib/push-decision), the router resolves it, and the loader scopes its read — and its offline
+  // fallback — to THAT machine. The tap is the one entry point that arrives with no router history
+  // behind it, so it is also the one most able to land on the wrong host's pane id.
+  it("a peer notification's deep link loads that host's pane, stale-but-present, offline", async () => {
+    server.use(
+      http.get(/\/api\/pane\/[^/]+$/, ({ request }) => {
+        const host = new URL(request.url).searchParams.get("host");
+        return HttpResponse.json({
+          paneId: "w1:p1",
+          text: host ? `on ${host}` : "on the lead",
+          truncated: false,
+          revision: 3,
+        });
+      }),
+    );
+    const { rootLoader, paneLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+    const { notificationPath } = await import("./push-decision");
+
+    const path = notificationPath({ paneId: "w1:p1", host: "badger" });
+    expect(path).toBe("/pane/w1%3Ap1?h=badger");
+    const tap = () => new Request(new URL(path, "http://localhost").href);
+
+    await paneLoader({ params: { paneId: "w1:p1" }, request: tap() }); // the tap, online
+    await rootLoader({ request: new Request("http://localhost/") }); // leave ⇒ a return is a nav
+
+    latchLost();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const data = await paneLoader({ params: { paneId: "w1:p1" }, request: tap() });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(data.error).toBe(true);
+    expect(data.scope).toEqual({ host: "badger", session: undefined });
+    expect(data.text).toBe("on badger"); // that machine's last-good mirror, never the lead's
+  });
+
+  it("polling within a pane during an outage keeps fetching (same url ⇒ revalidation)", async () => {
+    const { paneLoader } = await import("./loaders");
+    const { latchLost } = await import("./connection-health");
+
+    await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1:p1"),
+    });
+    latchLost();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await paneLoader({
+      params: { paneId: "w1:p1" },
+      request: new Request("http://localhost/pane/w1:p1"), // same url ⇒ poll ⇒ must fetch
+    });
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("does NOT fast-path when the connection is not latched (a brief blip still fetches)", async () => {
+    const { rootLoader } = await import("./loaders");
+    // No latchLost(): a transient blip must keep really fetching on navigation, not serve stale.
+    await rootLoader({ request: new Request("http://localhost/") });
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await rootLoader({ request: new Request("http://localhost/space/w1") }); // navigation, but not latched
+    expect(fetchSpy).toHaveBeenCalled();
   });
 });
 
@@ -553,6 +833,31 @@ describe("historyLoader", () => {
   });
 });
 
+// The lead's own clock has to reach the components, because it is what per-host staleness is measured
+// against (lib/host-health.ts). It rides on HomeData rather than being read from `Date.now()` at the
+// point of use — a phone whose clock is minutes off would otherwise report every peer in the pack
+// permanently stale, or permanently fresh, depending on which way it is wrong.
+describe("rootLoader — the snapshot's own timestamp", () => {
+  it("carries `ts` through to the route data", async () => {
+    server.use(
+      http.get("/api/snapshot", () => HttpResponse.json({ ...fixtureSnapshot, ts: 1_234_567 })),
+    );
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader({ request: new Request("http://x/") });
+    expect(data.ts).toBe(1_234_567);
+  });
+
+  it("is 0 on the empty degraded shape, where there are no servers to date anyway", async () => {
+    server.use(http.get("/api/snapshot", () => new HttpResponse("boom", { status: 502 })));
+    // A scope nothing has ever been cached for, so `staleHome` takes its no-cache branch.
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader({ request: new Request("http://x/?h=never-fetched") });
+    expect(data.error).toBe(true);
+    expect(data.servers).toEqual([]);
+    expect(data.ts).toBe(0);
+  });
+});
+
 // ── Surviving a cold boot with no network (lib/last-seen.ts) ──────────────────
 //
 // The case: a phone leaves Collie for the Tailscale app, the browser DISCARDS the hidden page, and
@@ -560,8 +865,8 @@ describe("historyLoader", () => {
 // so everything here re-imports the loaders (a fresh page) and asserts against what a fresh page can
 // still read: the write-through cache in sessionStorage.
 describe("cold boot with no network", () => {
-  const PANE_KEY = "collie:last-pane: w1:p1";
-  const SNAPSHOT_KEY = "collie:last-snapshot:";
+  const PANE_KEY = `collie:last-pane:${paneScopeKey(undefined, "w1:p1")}`;
+  const SNAPSHOT_KEY = `collie:last-snapshot:${scopeKey()}`;
 
   it("writes the snapshot through on a successful fetch", async () => {
     const { rootLoader } = await import("./loaders");
@@ -617,7 +922,7 @@ describe("cold boot with no network", () => {
     expect(data.lastSeenAt).toBeUndefined();
   });
 
-  it("keeps the cache per session", async () => {
+  it("keeps the cache per scope", async () => {
     const warm = await import("./loaders");
     await warm.rootLoader(); // primary only
 
@@ -680,5 +985,153 @@ describe("cold boot with no network", () => {
       await rootLoader();
       expect(sessionStorage.getItem(SNAPSHOT_KEY)).not.toBeNull();
     });
+  });
+});
+
+describe("packLoader", () => {
+  it("returns the census a lead serves", async () => {
+    server.use(http.get("/api/pack", () => HttpResponse.json(fixturePackStatus)));
+    const { packLoader } = await import("./loaders");
+    const data = await packLoader();
+    expect(data.error).toBe(false);
+    expect(data.status?.members.map((m) => m.id)).toEqual(["bluefin", "workshop", "attic"]);
+  });
+
+  // The default handler already refuses with 404, which is what a solo collie and a peer both do.
+  it("reads a 404 as 'there is no pack here', not as a failure", async () => {
+    const { packLoader } = await import("./loaders");
+    expect(await packLoader()).toEqual({ status: null, error: false });
+  });
+
+  it("keeps a real refusal apart from that answer", async () => {
+    server.use(http.get("/api/pack", () => new HttpResponse(null, { status: 500 })));
+    const { packLoader } = await import("./loaders");
+    expect(await packLoader()).toEqual({ status: null, error: true });
+  });
+});
+
+// ── THE SPACE NAVIGATOR IS ONE MACHINE'S (F14) ───────────────────────────────
+//
+// The lead's merge host-tags `workspaces` and `tabs` now, so its body carries every machine's
+// spaces — before that a peer's `w1` had no row at all and every count on the surviving row was the
+// lead's. The loader narrows them back to the address the url is on, exactly as it already narrows
+// the panes they are drawn beside.
+describe("rootLoader — spaces and tabs follow the host the url names", () => {
+  const packSnapshot = () =>
+    server.use(http.get("/api/snapshot", () => HttpResponse.json(fixturePackSnapshot)));
+
+  it("gives the lead's spaces when no host is named", async () => {
+    packSnapshot();
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader();
+    expect(data.workspaces.map((w) => w.host)).toEqual(["bluefin", "bluefin"]);
+    expect(data.tabs.every((t) => t.host === "bluefin")).toBe(true);
+  });
+
+  it("gives the peer's when the url names it — including its own `w1`", async () => {
+    packSnapshot();
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader({ request: new Request("http://localhost/?h=workshop") });
+    expect(data.workspaces.map((w) => [w.host, w.workspaceId])).toEqual([["workshop", "w1"]]);
+    expect(data.tabs.map((t) => [t.host, t.tabId])).toEqual([["workshop", "w1:t1"]]);
+  });
+
+  it("a solo body is untouched — every row passes, and no row carries a host", async () => {
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader();
+    expect(data.workspaces).toEqual(fixtureSnapshot.workspaces);
+    expect(data.tabs).toEqual(fixtureSnapshot.tabs);
+  });
+});
+
+// ── THE BREADTH, at the loader ───────────────────────────────────────────────
+//
+// `?all=1` in the browser becomes `?sessions=all` on the wire. The two spellings differ on purpose:
+// the wire word is the one the bridge already uses for the dimension, the url word is the one an
+// operator might read. What matters here is that the breadth reaches the fetch, lands on the DATA,
+// and does not disturb the address or the caches around it.
+describe("loaders — the widened view", () => {
+  const captureAll = () => {
+    const seen: (string | null)[] = [];
+    server.use(
+      http.get("/api/snapshot", ({ request }) => {
+        seen.push(new URL(request.url).searchParams.get("sessions"));
+        return HttpResponse.json(fixtureSnapshot);
+      }),
+    );
+    return seen;
+  };
+
+  it("asks for `sessions=all`, and surfaces the breadth on the data", async () => {
+    const seen = captureAll();
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader({ request: new Request("http://localhost/?all=1") });
+    expect(seen).toEqual(["all"]);
+    expect(data.viewAll).toBe(true);
+    // The BREADTH is not the address: the scope read back off that url names neither dimension.
+    expect(data.scope).toEqual({ host: undefined, session: undefined });
+  });
+
+  it("asks for nothing when nobody widened — every request that exists today", async () => {
+    const seen = captureAll();
+    const { rootLoader } = await import("./loaders");
+    const data = await rootLoader({ request: new Request("http://localhost/") });
+    expect(seen).toEqual([null]);
+    expect(data.viewAll).toBe(false);
+  });
+
+  it("carries the address alongside it, both halves", async () => {
+    let url = "";
+    server.use(
+      http.get("/api/snapshot", ({ request }) => {
+        url = new URL(request.url).search;
+        return HttpResponse.json(fixtureSnapshot);
+      }),
+    );
+    const { rootLoader } = await import("./loaders");
+    await rootLoader({ request: new Request("http://localhost/?h=badger&s=demo&all=1") });
+    expect(url).toContain("host=badger");
+    expect(url).toContain("session=demo");
+    expect(url).toContain("sessions=all");
+  });
+
+  // The nav-vs-revalidate discriminator is a full-URL string compare, so a third param has to be
+  // part of that string on BOTH runs or a poll would read as a navigation — and a navigation during
+  // a known outage returns cached data instead of really fetching, which is how recovery is found.
+  it("reads a second run at the same widened url as a POLL, not a navigation", async () => {
+    const seen = captureAll();
+    const { rootLoader } = await import("./loaders");
+    await rootLoader({ request: new Request("http://localhost/?all=1") });
+    await rootLoader({ request: new Request("http://localhost/?all=1") });
+    // Both really fetched: a navigation is only short-circuited during a latched outage, but the
+    // discriminator itself is what this pins — same url twice, so the second is a revalidation.
+    expect(seen).toEqual(["all", "all"]);
+  });
+
+  // The two breadths are different BODIES for one address. Sharing a cache entry would let an
+  // offline fallback answer a narrow view with a widened herd — rows from sessions it does not claim
+  // to show, and no fetch on the way to correct them.
+  it("does not serve a widened body to a narrow view when the fetch fails", async () => {
+    const { rootLoader } = await import("./loaders");
+    // Prime ONLY the widened cache with a real herd…
+    await rootLoader({ request: new Request("http://localhost/?all=1") });
+    // …then fail a narrow read. It must come back empty-and-flagged, not with the widened herd.
+    failSnapshot();
+    const narrow = await rootLoader({ request: new Request("http://localhost/") });
+    expect(narrow.error).toBe(true);
+    expect(narrow.agents).toEqual([]);
+  });
+});
+
+// The snapshot cache key and the per-pane cache key are built by two helpers that both NUL-join a
+// scope. They live in disjoint stores today (separate Maps, separate storage prefixes), so a
+// collision between them is harmless — but it is harmless by accident, and this pins the accident.
+describe("the two cache-key families stay apart", () => {
+  it("keeps the widened snapshot key out of the per-pane namespace", async () => {
+    const { snapshotKey } = await import("@/lib/scope");
+    // Byte-equal by construction: `snapshotKey(scope, true)` is `scopeKey(scope) + "\0all"`, which is
+    // also what a pane literally named `all` would key to. Neither store can see the other's keys.
+    expect(snapshotKey({}, true)).toBe(paneScopeKey({}, "all"));
+    expect(snapshotKey({})).toBe(scopeKey({}));
   });
 });

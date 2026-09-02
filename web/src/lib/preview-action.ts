@@ -19,10 +19,13 @@
 // contract in harness/preview-model.ts, wired to this kind by harness/dialog-contract.ts.
 
 import { sendKeys, sendReply } from "./api";
+import { describeApiError, describeThrownError } from "./api-error-message";
 import { type PreviewOption, type PreviewSelectModel } from "./blocks";
 import { guardDialog, pollDialog, type DialogTarget } from "./dialog-guard";
+import { t } from "./i18n";
 import { previewCoreEqual, previewStructureEqual } from "./harness/preview-model";
 import { sanitizeTypedText, type ActionResult, type Sleep } from "./harness/guard";
+import type { Scope } from "./scope";
 
 /** This module's slice of the generic guard: the preview dialog the tap is aimed at. */
 function target(args: GuardArgs): DialogTarget<"preview-select"> & { sleep?: Sleep } {
@@ -47,8 +50,8 @@ interface GuardArgs {
   /** The `revision` the rendered dialog was detected against. */
   detectedRevision: number;
   preview: PreviewSelectModel;
-  /** The session the pane lives in (undefined = primary) — scopes every read + keystroke below. */
-  session?: string;
+  /** Which machine + which named session the pane lives in — scopes every read + keystroke below. */
+  scope?: Scope;
   /** The pane's agent — which adapter re-derives the fresh screen. No adapter = the guard refuses. */
   agent?: string;
   /** Test seam for the verification polls' pacing. */
@@ -71,13 +74,13 @@ export async function submitPreviewOption(
     const digit = await sendKeys(
       args.paneId,
       [String(args.option.n)],
-      args.session,
+      args.scope,
       guarded.region,
     );
     if (!digit.ok && digit.code === "prompt_changed") return { status: "changed" };
-    if (!digit.ok) return { status: "error", error: digit.error };
+    if (!digit.ok) return { status: "error", error: describeApiError(digit) };
   } catch (e) {
-    return { status: "error", error: e instanceof Error ? e.message : String(e) };
+    return { status: "error", error: describeThrownError(e) };
   }
 
   const pointed = await pollDialog(
@@ -89,11 +92,11 @@ export async function submitPreviewOption(
   if (pointed !== "ok") return { status: "changed" };
 
   try {
-    const enter = await sendKeys(args.paneId, ["Enter"], args.session);
-    if (!enter.ok) return { status: "error", error: enter.error };
+    const enter = await sendKeys(args.paneId, ["Enter"], args.scope);
+    if (!enter.ok) return { status: "error", error: describeApiError(enter) };
     return { status: "sent" };
   } catch (e) {
-    return { status: "error", error: e instanceof Error ? e.message : String(e) };
+    return { status: "error", error: describeThrownError(e) };
   }
 }
 
@@ -122,17 +125,17 @@ export async function submitPreviewNote(
 
   try {
     // Bind only this first write. It changes the dialog, so later steps must not reuse this region.
-    const open = await sendKeys(args.paneId, ["n"], args.session, guarded.region);
+    const open = await sendKeys(args.paneId, ["n"], args.scope, guarded.region);
     if (!open.ok && open.code === "prompt_changed") return { status: "changed" };
-    if (!open.ok) return { status: "error", error: open.error };
+    if (!open.ok) return { status: "error", error: describeApiError(open) };
   } catch (e) {
-    return { status: "error", error: e instanceof Error ? e.message : String(e) };
+    return { status: "error", error: describeThrownError(e) };
   }
 
   // The input must be FOCUSED before anything else is sent — early keys are misrouted (verified).
   // On timeout we stop dead: a blind Escape could cancel the whole dialog if `n` never landed.
   if ((await pollDialog(target(args), editing)) !== "ok") {
-    return { status: "error", error: "Note input didn't open — check the pane" };
+    return { status: "error", error: t("previewAction.note.notOpened") };
   }
 
   try {
@@ -143,18 +146,18 @@ export async function submitPreviewNote(
       const clear = await sendKeys(
         args.paneId,
         ["ctrl+k", ...Array.from({ length: CLEAR_SWEEP }, () => "Backspace")],
-        args.session,
+        args.scope,
       );
-      if (!clear.ok) return { status: "error", error: clear.error };
+      if (!clear.ok) return { status: "error", error: describeApiError(clear) };
       if (
         (await pollDialog(target(args), (m) => editing(m) && m.note.text === "")) !== "ok"
       ) {
-        return { status: "error", error: "Couldn't clear the existing note — check the pane" };
+        return { status: "error", error: t("previewAction.note.clearFailed") };
       }
     }
     if (text.length > 0) {
-      const typed = await sendReply(args.paneId, text, false, args.session);
-      if (!typed.ok) return { status: "error", error: typed.error };
+      const typed = await sendReply(args.paneId, text, false, args.scope);
+      if (!typed.ok) return { status: "error", error: describeApiError(typed) };
       // Wait for the text to render. The input windows long text around the trailing cursor, so
       // the visible value is the TAIL of what we typed (the whole of it when it fits).
       const landed = await pollDialog(
@@ -162,7 +165,7 @@ export async function submitPreviewNote(
         (m) => editing(m) && m.note.text.length > 0 && text.endsWith(m.note.text),
       );
       if (landed !== "ok") {
-        return { status: "error", error: "Note text didn't arrive — check the pane" };
+        return { status: "error", error: t("previewAction.note.textFailed") };
       }
     }
     // Blur, keeping the text. Verified (the swallowed-ESC hazard above). The ONLY safe reason to
@@ -171,8 +174,8 @@ export async function submitPreviewNote(
     // (a successor dialog, or a now-running agent — pollUntil returns "drifted"), a second blind
     // Escape would cancel/interrupt whatever is there now — so abort with "changed" and send nothing.
     for (let attempt = 0; attempt < 2; attempt++) {
-      const blur = await sendKeys(args.paneId, ["Escape"], args.session);
-      if (!blur.ok) return { status: "error", error: blur.error };
+      const blur = await sendKeys(args.paneId, ["Escape"], args.scope);
+      if (!blur.ok) return { status: "error", error: describeApiError(blur) };
       const blurred = await pollDialog(
         target(args),
         (m) => previewCoreEqual(m, args.preview) && m.note.state !== "editing",
@@ -181,9 +184,9 @@ export async function submitPreviewNote(
       if (blurred === "drifted") return { status: "changed" }; // no second Escape at a successor
       // "timeout": our dialog is still editing — the ESC was likely swallowed. Retry once.
     }
-    return { status: "error", error: "Note input didn't close — check the pane" };
+    return { status: "error", error: t("previewAction.note.closeFailed") };
   } catch (e) {
-    return { status: "error", error: e instanceof Error ? e.message : String(e) };
+    return { status: "error", error: describeThrownError(e) };
   }
 }
 
@@ -198,11 +201,11 @@ export async function submitPreviewKeys(
   if (!guarded.ok) return guarded.result;
   try {
     // Bind only this first write. It changes the dialog, so later steps must not reuse this region.
-    const res = await sendKeys(args.paneId, args.keys, args.session, guarded.region);
+    const res = await sendKeys(args.paneId, args.keys, args.scope, guarded.region);
     if (!res.ok && res.code === "prompt_changed") return { status: "changed" };
-    if (!res.ok) return { status: "error", error: res.error };
+    if (!res.ok) return { status: "error", error: describeApiError(res) };
     return { status: "sent" };
   } catch (e) {
-    return { status: "error", error: e instanceof Error ? e.message : String(e) };
+    return { status: "error", error: describeThrownError(e) };
   }
 }

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { parseAnsi } from "../ansi";
-import { splitLines, type StyledLine } from "../blocks";
+import { splitLines } from "../blocks";
 import { codexAdapter } from "./codex";
 import { locateComposer, stripChrome } from "./codex/chrome";
 import { isStatusRow, lineText, PLACEHOLDER } from "./codex/markers";
@@ -16,16 +16,16 @@ const PANES_DIR = join(import.meta.dirname, "..", "..", "fixtures", "panes");
 
 const allCodexFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("codex--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 const allClaudeFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("claude--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 const allOmpFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("omp--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 const allGrokFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("grok--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 
 const PINNED = [
   "codex--approval-exec.txt",
@@ -326,7 +326,7 @@ describe("the styled status-row acceptor fails closed", () => {
   const OFF = "\u001b[0m";
   const SEP = `${DIM} · ${OFF}`;
 
-  function row(raw: string): { text: string; line: StyledLine } {
+  function row(raw: string) {
     const line = splitLines(parseAnsi(raw))[0]!;
     return { text: lineText(line), line };
   }

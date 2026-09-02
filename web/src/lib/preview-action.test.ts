@@ -15,6 +15,7 @@ import { fetchPane, sendKeys, sendReply } from "./api";
 import { parseAnsi } from "./ansi";
 import { splitLines } from "./blocks";
 import { detectPreviewSelect } from "./harness/claude/preview-select";
+import { t } from "./i18n";
 import {
   NOTE_MAX_LENGTH,
   previewsEqual,
@@ -312,6 +313,8 @@ describe("submitPreviewNote — n → verify focus → clear → type → Escape
     );
     const res = await submitPreviewNote({ ...base, preview: m, text: raw });
     expect(res).toEqual({ status: "sent" });
+    // SAFETY: `sendReply(paneId, text, …)` — argument 1 is the text, a string by that signature.
+    // Vitest types a recorded call argument loosely, which is the only reason this is written down.
     const typed = mockSendReply.mock.calls[0]![1] as string;
     expect(typed).toBe(expected);
     expect(typed.startsWith("a b c x")).toBe(true);
@@ -334,6 +337,8 @@ describe("submitPreviewNote — n → verify focus → clear → type → Escape
     );
     const res = await submitPreviewNote({ ...base, preview: m, text: raw });
     expect(res).toEqual({ status: "sent" });
+    // SAFETY: `sendReply(paneId, text, …)` — argument 1 is the text, a string by that signature.
+    // Vitest types a recorded call argument loosely, which is the only reason this is written down.
     const typed = mockSendReply.mock.calls[0]![1] as string;
     expect(typed).toBe(expected);
     expect(typed).not.toMatch(/\p{Cc}/u); // no raw control byte survives
@@ -401,7 +406,7 @@ describe("submitPreviewNote — n → verify focus → clear → type → Escape
     const m = model({});
     mockFetchPane.mockResolvedValue(paneWith(buffer({}))); // editing state never appears
     const res = await submitPreviewNote({ ...base, preview: m, text: "hello" });
-    expect(res).toEqual({ status: "error", error: "Note input didn't open — check the pane" });
+    expect(res).toEqual({ status: "error", error: t("previewAction.note.notOpened") });
     expect(mockSendKeys.mock.calls).toEqual([
       ["w1:p1", ["n"], undefined, m.regionSignature],
     ]);

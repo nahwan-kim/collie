@@ -18,11 +18,15 @@
 // choreography submitPreviewNote already uses for the note field, applied to the main input.
 
 import { fetchPane, sendReply } from "./api";
+import { describeApiError, describeThrownError } from "./api-error-message";
 import { parseAnsi } from "./ansi";
 import { splitLines } from "./blocks";
+import { t } from "./i18n";
+import { graphemeSegmenter } from "./env";
 import { adapterFor, type HarnessAdapter } from "./harness";
 import { POLL_ATTEMPTS, POLL_DELAY_MS, defaultSleep, type Sleep } from "./harness/guard";
 import { detectNoEchoPrompt } from "./no-echo";
+import type { Scope } from "./scope";
 
 export type ReplyOutcome =
   /** Text was verified in the input box and the submit key went through. */
@@ -62,10 +66,7 @@ const FOLD_SEAM = " ";
  *  precision, never the app. The `null` branches below fall back to per-code-point counting, which
  *  is exactly what this check did before clusters were understood at all — a match that stops mid
  *  cluster slips through there, as it always did. */
-const GRAPHEMES =
-  typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : null;
+const GRAPHEMES = graphemeSegmenter();
 
 /** A cluster nobody can see: whitespace, or formatting controls that render as nothing at all
  *  (LRM/RLM, zero-width space, soft hyphen). A cluster that merely CONTAINS one still counts — the
@@ -175,8 +176,8 @@ export interface GuardedReplyArgs {
   text: string;
   /** The pane's agent — picks the adapter whose `extractInputDraft` can read the input box. */
   agent: string | undefined | null;
-  /** The session the pane lives in (undefined = primary) — scopes every call. */
-  session?: string;
+  /** Which machine + which named session the pane lives in — scopes every call. */
+  scope?: Scope;
   /** Lines to request per verification read (undefined = the bridge's default tail, which is where
    *  the input box always is). */
   requestedLines?: number;
@@ -277,11 +278,11 @@ export async function sendGuardedReply(args: GuardedReplyArgs): Promise<ReplyOut
 
   let typed;
   try {
-    typed = await sendReply(args.paneId, args.text, false, args.session);
+    typed = await sendReply(args.paneId, args.text, false, args.scope);
   } catch (e) {
     return { status: "error", error: message(e) };
   }
-  if (!typed.ok) return { status: "error", error: typed.error };
+  if (!typed.ok) return { status: "error", error: describeApiError(typed) };
 
   const sleep = args.sleep ?? defaultSleep;
   // The last screen a verification read actually saw, kept only so the stall below can be named. The
@@ -296,7 +297,7 @@ export async function sendGuardedReply(args: GuardedReplyArgs): Promise<ReplyOut
     if (attempt > 0) await sleep(POLL_DELAY_MS);
     let draft: string | null = null;
     try {
-      const fresh = await fetchPane(args.paneId, args.requestedLines, args.session);
+      const fresh = await fetchPane(args.paneId, args.requestedLines, args.scope);
       const lines = splitLines(parseAnsi(fresh.text));
       // Only a screen the adapter does NOT recognise as its composer can be a raw password prompt.
       // Without that gate a match on the tail is dangerous rather than merely wrong: the notice this
@@ -334,25 +335,26 @@ export async function sendGuardedReply(args: GuardedReplyArgs): Promise<ReplyOut
     // password means the operator needs one Enter, not a retry, and a retry would type a second copy.
     return {
       status: "stalled",
-      error:
-        "That's a password prompt — it shows nothing as you type, so the text can't be confirmed and nothing was submitted. What you typed is already in the pane.",
+      error: t("reply.stalled.noEcho"),
       noEcho: lastSeen,
     };
   }
   return {
     status: "stalled",
-    error:
-      "Message didn't reach the input box — a dialog may be waiting, and if you were answering it by key that key likely landed. Nothing was submitted.",
+    error: t("reply.stalled.generic"),
   };
 }
 
-const NO_BOX =
-  "The agent's input box isn't on screen — a menu or dialog is probably up. Nothing was typed.";
+function noBoxMessage(): string {
+  return t("reply.blocked.noBox");
+}
 
-/** Said instead of {@link NO_BOX} when the screen is a password prompt. It names the mechanism rather
- *  than the symptom, because the operator's next move depends on knowing that waiting won't help. */
-const NO_ECHO =
-  "That's a password prompt — it shows nothing as you type, so Send can never confirm the text arrived. Nothing was typed.";
+/** Said instead of {@link noBoxMessage} when the screen is a password prompt. It names the mechanism
+ *  rather than the symptom, because the operator's next move depends on knowing that waiting won't
+ *  help. */
+function noEchoMessage(): string {
+  return t("reply.blocked.noEcho");
+}
 
 /**
  * What the pre-flight decided. Two fields, and the second is the safety invariant of this module made
@@ -375,6 +377,9 @@ interface Preflight {
   runPreType: (() => Promise<ReplyOutcome | null>) | null;
 }
 
+/** A preflight that read nothing: no pre-type sweep may run, and `refuse` says whether to send. */
+const blind = (refuse: ReplyOutcome | null): Preflight => ({ refuse, runPreType: null });
+
 /**
  * One live read, and everything the rest of the send is allowed to do with it.
  *
@@ -386,8 +391,6 @@ interface Preflight {
  * once sent they have already landed in whatever owns the keyboard.
  */
 async function preflight(adapter: HarnessAdapter, args: GuardedReplyArgs): Promise<Preflight> {
-  const blind = (refuse: ReplyOutcome | null): Preflight => ({ refuse, runPreType: null });
-
   // Nothing here can read this harness's input box, so there is no evidence to be had — and no
   // refusal to make either. Same behaviour as before an adapter grows a `composerReady`, minus the
   // sweep, which had no business going out unverified.
@@ -396,7 +399,7 @@ async function preflight(adapter: HarnessAdapter, args: GuardedReplyArgs): Promi
   const composerReady = adapter.composerReady.bind(adapter);
   let probe;
   try {
-    probe = await fetchPane(args.paneId, args.requestedLines, args.session);
+    probe = await fetchPane(args.paneId, args.requestedLines, args.scope);
   } catch {
     return blind(null); // transient read failure
   }
@@ -411,8 +414,8 @@ async function preflight(adapter: HarnessAdapter, args: GuardedReplyArgs): Promi
     // ever work, because the evidence this guard needs is exactly what the prompt is refusing to show
     // (#103). Hand the prompt itself back so the caller can say so and offer "Type".
     const noEcho = detectNoEchoPrompt(seen);
-    if (noEcho !== null) return blind({ status: "blocked", error: NO_ECHO, noEcho });
-    return blind({ status: "blocked", error: NO_BOX });
+    if (noEcho !== null) return blind({ status: "blocked", error: noEchoMessage(), noEcho });
+    return blind({ status: "blocked", error: noBoxMessage() });
   }
 
   // The region the read's `true` was true OF. Computed here, from the same parse `composerReady` just
@@ -438,15 +441,14 @@ async function preflight(adapter: HarnessAdapter, args: GuardedReplyArgs): Promi
       // otherwise this ordering, which exists to stop keys reaching a dialog, would hand the dialog
       // the reply instead. Still fail-open on a throw: the submit key is guarded downstream.
       try {
-        const fresh = await fetchPane(args.paneId, args.requestedLines, args.session);
+        const fresh = await fetchPane(args.paneId, args.requestedLines, args.scope);
         if (composerReady(splitLines(parseAnsi(fresh.text)))) return null;
       } catch {
         return null;
       }
       return {
         status: "blocked",
-        error:
-          "The agent's input box left the screen while its input line was being cleared — a menu or dialog is probably up. Your message wasn't typed.",
+        error: t("reply.blocked.composerLeft"),
       };
     },
   };
@@ -460,8 +462,8 @@ async function oneShot(args: GuardedReplyArgs): Promise<ReplyOutcome> {
   // `adapterFor(agent)?.extractInputDraft`, so a pane with no adapter has no draft to sweep and the
   // composer's callback was already a no-op here.
   try {
-    const res = await sendReply(args.paneId, args.text, true, args.session);
-    return res.ok ? { status: "sent" } : { status: "error", error: res.error };
+    const res = await sendReply(args.paneId, args.text, true, args.scope);
+    return res.ok ? { status: "sent" } : { status: "error", error: describeApiError(res) };
   } catch (e) {
     return { status: "error", error: message(e) };
   }
@@ -474,13 +476,15 @@ async function oneShot(args: GuardedReplyArgs): Promise<ReplyOutcome> {
  */
 async function submitOnly(args: GuardedReplyArgs): Promise<ReplyOutcome> {
   try {
-    const res = await sendReply(args.paneId, "", true, args.session);
+    const res = await sendReply(args.paneId, "", true, args.scope);
     if (res.ok) return { status: "sent" };
     // The text is verifiably sitting in the input box and only the submit key failed — same shape as
     // the bridge's own partial-failure case. Tell the caller not to resend.
     return {
+      // The bridge's own `reply.not_submitted` case, reached from the client side — so it says it
+      // with the bridge's own catalogued sentence rather than a second copy of the English.
       status: "error",
-      error: "typed into the pane but not submitted — check the pane before resending",
+      error: t("apiError.reply.not_submitted"),
       textDelivered: true,
     };
   } catch (e) {
@@ -488,6 +492,8 @@ async function submitOnly(args: GuardedReplyArgs): Promise<ReplyOutcome> {
   }
 }
 
-function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+function message<TThrown>(e: TThrown): string {
+  // A throw from lib/api.ts carries the bridge's code, so it can be said in the operator's language;
+  // a transport failure still falls through to its own message (lib/api-error-message.ts).
+  return describeThrownError(e);
 }

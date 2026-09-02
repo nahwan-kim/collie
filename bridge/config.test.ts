@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { defaultSocketPath, isLoopbackBindHost, loadConfig } from "./config.ts";
+import {
+  defaultSocketPath,
+  envBool,
+  isLoopbackBindHost,
+  loadConfig,
+  nonLoopbackBindRefusal,
+  resolveBridgeHost,
+} from "./config.ts";
 
 // loadConfig is the deployment contract — env vars in, a resolved Config out. Pure (just reads
 // process.env + homedir), so we drive it by mutating the environment and restoring it after.
@@ -292,11 +299,13 @@ describe("loadConfig", () => {
     expect(cfg.trustedUser).toBe("me@example.com");
   });
 
-  test("refuses a non-loopback bind unless the escape hatch is set", () => {
+  test("carries a non-loopback bind and its escape hatch without deciding either", () => {
     process.env.COLLIE_HOST = "0.0.0.0";
-    expect(() => loadConfig()).toThrow(/not a loopback address/);
-    process.env.COLLIE_ALLOW_NON_LOOPBACK_BIND = "1";
+    // loadConfig REPORTS the bind; it does not refuse it. The refusal needs the pack mode, which is
+    // resolved after this runs (bridge/index.ts) — see nonLoopbackBindRefusal below.
     expect(loadConfig().host).toBe("0.0.0.0");
+    expect(loadConfig().allowNonLoopbackBind).toBe(false);
+    process.env.COLLIE_ALLOW_NON_LOOPBACK_BIND = "1";
     expect(loadConfig().allowNonLoopbackBind).toBe(true);
   });
 
@@ -321,6 +330,29 @@ describe("loadConfig", () => {
   test("an unrecognised dial mode falls back to auto rather than dialling nothing", () => {
     process.env.COLLIE_HERDR_DIAL = "carrier-pigeon";
     expect(loadConfig().dialMode).toBe("auto");
+  });
+});
+
+describe("nonLoopbackBindRefusal", () => {
+  test("a loopback bind is never refused, whatever the hatch says", () => {
+    expect(nonLoopbackBindRefusal({ host: "127.0.0.1", allowNonLoopbackBind: false })).toBeNull();
+    expect(nonLoopbackBindRefusal({ host: "::1", allowNonLoopbackBind: false })).toBeNull();
+  });
+
+  test("a wide bind is refused, and names the one variable that permits it", () => {
+    const why = nonLoopbackBindRefusal({ host: "0.0.0.0", allowNonLoopbackBind: false });
+    expect(why).toMatch(/not a loopback address/);
+    expect(why).toContain("COLLIE_ALLOW_NON_LOOPBACK_BIND=1");
+  });
+
+  test("an empty COLLIE_HOST is a wide bind, and says so in words", () => {
+    expect(nonLoopbackBindRefusal({ host: "", allowNonLoopbackBind: false })).toContain(
+      "every interface",
+    );
+  });
+
+  test("the escape hatch clears it", () => {
+    expect(nonLoopbackBindRefusal({ host: "10.0.0.4", allowNonLoopbackBind: true })).toBeNull();
   });
 });
 
@@ -356,5 +388,48 @@ describe("defaultSocketPath", () => {
     expect(defaultSocketPath("win32", {}, "C:\\Users\\u")).toBe(
       join("C:\\Users\\u", "AppData", "Roaming", "herdr", "herdr.sock"),
     );
+  });
+});
+
+// Also the source `cli/doctor.ts`'s bind check and `cli/lifecycle.ts`'s readiness probe read, so a
+// peer's COLLIE_HOST resolves identically wherever it's asked.
+describe("resolveBridgeHost", () => {
+  test("absent COLLIE_HOST resolves to loopback", () => {
+    expect(resolveBridgeHost({})).toBe("127.0.0.1");
+  });
+
+  test("an explicit COLLIE_HOST is used verbatim — a peer's tailnet address, say", () => {
+    expect(resolveBridgeHost({ COLLIE_HOST: "100.64.0.8" })).toBe("100.64.0.8");
+  });
+
+  test("explicitly empty is passed through, not defaulted — the wildcard-bind case", () => {
+    expect(resolveBridgeHost({ COLLIE_HOST: "" })).toBe("");
+  });
+});
+
+// Exported so mode-scoped config (bridge/pack/config.ts) parses its env in this exact style instead
+// of growing a second reader. The env source is injectable, which is the only new thing here — the
+// truth table below is the one loadConfig has always used.
+describe("envBool", () => {
+  test("empty and unset fall back", () => {
+    expect(envBool("X", true, {})).toBe(true);
+    expect(envBool("X", false, {})).toBe(false);
+    expect(envBool("X", true, { X: "" })).toBe(true);
+    expect(envBool("X", true, { X: "   " })).toBe(true);
+  });
+
+  test("the truthy and falsy vocabularies, case-insensitively", () => {
+    for (const v of ["on", "1", "true", "yes", "TRUE", " Yes "]) expect(envBool("X", false, { X: v })).toBe(true);
+    for (const v of ["off", "0", "false", "no", "OFF", " No "]) expect(envBool("X", true, { X: v })).toBe(false);
+  });
+
+  test("garbage falls back rather than silently flipping a feature", () => {
+    expect(envBool("X", true, { X: "maybe" })).toBe(true);
+    expect(envBool("X", false, { X: "maybe" })).toBe(false);
+  });
+
+  test("defaults to process.env when no source is given", () => {
+    process.env.COLLIE_MULTI_SESSION = "off";
+    expect(envBool("COLLIE_MULTI_SESSION", true)).toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import type { JsonObject, JsonValue } from "./json.ts";
 import { createOperatorFileReader, diskIo, type OperatorFileIo } from "./operator-file.ts";
 import type { OperatorQuickReplyRow } from "./types.ts";
 
@@ -48,11 +49,11 @@ export function validateOperatorQuickReplies(
   const out: OperatorQuickReplyRow[] = [];
   const at = new Map<string, number>();
   for (const raw of rows) {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    if (typeof raw !== "object" || raw === null || raw === undefined || Array.isArray(raw)) {
       warn("ignoring a row that is not a [[replies]] table");
       continue;
     }
-    const row = raw as Record<string, unknown>;
+    const row: JsonObject = raw;
     const title = typeof row.title === "string" ? row.title.trim() : "";
     if (title === "") {
       warn(`ignoring a row with no title: ${JSON.stringify(row.items)}`);
@@ -70,11 +71,9 @@ export function validateOperatorQuickReplies(
       }
       agent = row.scope.trim().toLowerCase();
     }
-    const parsed: OperatorQuickReplyRow = {
-      ...(agent ? { agent } : {}),
-      title,
-      items,
-    };
+    const parsed: OperatorQuickReplyRow = { title, items };
+    // Assigned, never conditionally spread: an unscoped row carries NO `agent` key.
+    if (agent) parsed.agent = agent;
     // Identity is scope+title, matching keys.toml's scope+label: two groups sharing one heading on
     // one pane would be two sections a thumb cannot tell apart. The later row wins IN PLACE, so
     // correcting a group does not reshuffle the dock.
@@ -92,7 +91,7 @@ export function validateOperatorQuickReplies(
 }
 
 /** The row's `items` array, trimmed of blanks — or null (already warned) when nothing is left. */
-function readItems(value: unknown, title: string, warn: (message: string) => void): string[] | null {
+function readItems(value: JsonValue | undefined, title: string, warn: (message: string) => void): string[] | null {
   if (!Array.isArray(value) || value.length === 0) {
     warn(`ignoring "${title}" — items must be a non-empty array of strings`);
     return null;

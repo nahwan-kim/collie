@@ -49,7 +49,7 @@ describe("locateComposer — the real corpus", () => {
   });
 
   it("covers every composer capture in the corpus", () => {
-    expect(PINNED.map((p) => p.fixture).sort()).toEqual([...COMPOSER_FIXTURES].sort());
+    expect(PINNED.map((p) => p.fixture).toSorted()).toEqual([...COMPOSER_FIXTURES].toSorted());
   });
 
   it("declines a square user-message bubble with no composer", () => {

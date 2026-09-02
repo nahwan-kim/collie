@@ -71,16 +71,16 @@ describe("composerGhost — omp's inline completion suggestion", () => {
   const PAD = " ".repeat(10);
 
   it("claims the trailing coloured run that follows the operator's own text", () => {
-    const row = `${CORNER}╰─ \x1b[0mlist the files in this repo${SUGGEST}sitory\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
-    expect(composerGhost(splitLines(parseAnsi(row))[0]!)).toBe("sitory");
+    const borderRow = `${CORNER}╰─ \x1b[0mlist the files in this repo${SUGGEST}sitory\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
+    expect(composerGhost(splitLines(parseAnsi(borderRow))[0]!)).toBe("sitory");
   });
 
   // omp 18's busy shape, and the regression this rule was rewritten for: the draft is no longer
   // unstyled, so "coloured run after unstyled text" saw nothing and the suggestion stayed in the
   // draft. What separates the two runs is that their colours DIFFER, not that one of them is absent.
   it("claims it just the same when the draft carries a foreground of its own", () => {
-    const row = `${CORNER}╰─ ${DRAFT}list the files in this repo${SUGGEST}sitory\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
-    expect(composerGhost(splitLines(parseAnsi(row))[0]!)).toBe("sitory");
+    const borderRow = `${CORNER}╰─ ${DRAFT}list the files in this repo${SUGGEST}sitory\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
+    expect(composerGhost(splitLines(parseAnsi(borderRow))[0]!)).toBe("sitory");
   });
 
   it("reads it off the real captures, and leaves the plain one alone", () => {
@@ -93,18 +93,18 @@ describe("composerGhost — omp's inline completion suggestion", () => {
   // Both of these keep a real draft whole. A wrongly-claimed ghost SHORTENS the text the reply guard
   // verifies, so every ambiguous row must claim nothing.
   it("claims nothing when the row is painted in one foreground end to end", () => {
-    const row = `${SUGGEST}╰─ list the files in this repo${PAD} ─╯\x1b[0m`;
-    expect(composerGhost(splitLines(parseAnsi(row))[0]!)).toBe("");
+    const borderRow = `${SUGGEST}╰─ list the files in this repo${PAD} ─╯\x1b[0m`;
+    expect(composerGhost(splitLines(parseAnsi(borderRow))[0]!)).toBe("");
   });
 
   it("claims nothing when the draft and the run share one colour", () => {
-    const row = `${CORNER}╰─ ${DRAFT}list the files in this repo${DRAFT}sitory\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
-    expect(composerGhost(splitLines(parseAnsi(row))[0]!)).toBe("");
+    const borderRow = `${CORNER}╰─ ${DRAFT}list the files in this repo${DRAFT}sitory\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
+    expect(composerGhost(splitLines(parseAnsi(borderRow))[0]!)).toBe("");
   });
 
   it("claims nothing when the coloured run is not at the end of the draft", () => {
-    const row = `${CORNER}╰─ \x1b[0m${SUGGEST}red\x1b[0m then plain text${PAD}${CORNER} ─╯\x1b[0m`;
-    expect(composerGhost(splitLines(parseAnsi(row))[0]!)).toBe("");
+    const borderRow = `${CORNER}╰─ \x1b[0m${SUGGEST}red\x1b[0m then plain text${PAD}${CORNER} ─╯\x1b[0m`;
+    expect(composerGhost(splitLines(parseAnsi(borderRow))[0]!)).toBe("");
   });
 
   // The known, bounded over-claim, pinned so it stays a DECISION rather than an accident: omp paints
@@ -116,8 +116,8 @@ describe("composerGhost — omp's inline completion suggestion", () => {
     const gradient = [..."ultrathink"]
       .map((c, i) => `\x1b[38;2;${100 + i * 10};${50 + i * 5};${200 - i * 7}m${c}`)
       .join("");
-    const row = `${CORNER}╰─ ${DRAFT}please ${gradient}\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
-    expect(composerGhost(splitLines(parseAnsi(row))[0]!)).toBe("k");
+    const borderRow = `${CORNER}╰─ ${DRAFT}please ${gradient}\x1b[0m${PAD}${CORNER} ─╯\x1b[0m`;
+    expect(composerGhost(splitLines(parseAnsi(borderRow))[0]!)).toBe("k");
 
     const sent = "please ultrathink";
     expect(draftCarriesSend(sent, "please ultrathink")).toBe(true);

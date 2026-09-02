@@ -16,16 +16,16 @@ const PANES_DIR = join(import.meta.dirname, "..", "..", "fixtures", "panes");
 
 const allGrokFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("grok--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 const allClaudeFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("claude--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 const allOmpFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("omp--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 const allCodexFixtures = readdirSync(PANES_DIR)
   .filter((f) => f.startsWith("codex--") && f.endsWith(".txt"))
-  .sort();
+  .toSorted();
 
 const PINNED = [
   "grok--ask-color-moved.txt",

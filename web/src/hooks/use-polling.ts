@@ -1,8 +1,11 @@
 import { useEffect, useRef } from "react";
 import { useRevalidator } from "react-router";
 
+import { refreshNow } from "@/lib/api";
+import { isLongUpload } from "@/lib/connection-health";
 import { beginCatchUp, endCatchUp, isLocked, useLocked } from "@/lib/idle";
 import type { HomeData } from "@/lib/loaders";
+import type { Scope } from "@/lib/scope";
 
 // Adaptive polling, the React Router way: a timer that calls `revalidator.revalidate()`, which
 // re-runs every active loader (snapshot + the open pane) — our equivalent of a refetch interval.
@@ -45,8 +48,32 @@ export function intervalFor(data: HomeData | undefined, paneId?: string | null):
   return COLD_MS;
 }
 
-export function usePolling(data: HomeData | undefined, paneId?: string | null): void {
+/**
+ * Come back to a fresh herd, not to whatever was true when the phone was put down.
+ *
+ * THE TWO MOMENTS THIS COVERS ARE THE SAME MOMENT to an operator: the page becoming visible again,
+ * and the idle pause being released. Both are "I am looking at this now", and both previously did
+ * nothing but revalidate — which re-reads the BRIDGE's snapshot, and the bridge's snapshot is only
+ * as fresh as the multiplexer census behind it. Under an adapter that censuses, a tab opened while
+ * the phone was in a pocket could therefore be up to its declared bound old at the very instant the
+ * operator looked (ADR 0031).
+ *
+ * The refresh is fired and NOT awaited before the revalidation, deliberately. Awaiting it would make
+ * every foreground a two-round-trip wait before anything on screen moved, to save a fraction of one
+ * poll interval — the revalidation that follows the refresh's own poke is the one that carries the
+ * change, and it arrives on its own. What the operator sees is the current data at once and the
+ * corrected data a beat later, rather than a blank beat and then both.
+ */
+function lookNow(scope: Scope | undefined): void {
+  void refreshNow(scope);
+}
+
+export function usePolling(data: HomeData | undefined, paneId?: string | null, scope?: Scope): void {
   const revalidator = useRevalidator();
+  // Held in a ref for the same reason the revalidator is: the tick effect must not re-subscribe
+  // every time the viewed host or session changes identity.
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   // Hold the revalidator in a ref so the effect only re-subscribes when the cadence changes,
   // not on every revalidation (its identity flips each cycle).
   const ref = useRef(revalidator);
@@ -75,6 +102,7 @@ export function usePolling(data: HomeData | undefined, paneId?: string | null): 
     wasLocked.current = locked;
     if (!released) return;
     beginCatchUp(); // holds the cover through the refetch — see the settle effect below
+    lookNow(scopeRef.current);
     if (ref.current.state === "idle") ref.current.revalidate();
   }, [locked]);
 
@@ -93,6 +121,11 @@ export function usePolling(data: HomeData | undefined, paneId?: string | null): 
       // the `navigator.onLine` trap below, this flag can't lie: it's set by our own lock, and
       // resuming re-runs every loader, so a pause can't strand the UI on stale data.
       if (isLocked()) return;
+      // A long upload the operator started (a voice clip) is on the wire. A phone's uplink is the
+      // narrow half of a mobile link, so a poll fired now does not arrive sooner — it queues behind
+      // the audio and makes the audio slower. Skipped, not cancelled: the upload ends in seconds,
+      // releasing it stamps a wake, and the very next tick reads a fresh snapshot.
+      if (isLongUpload()) return;
       // Deliberately NO navigator.onLine gate here. On some phones the flag lies — it stuck FALSE
       // after an airplane-mode toggle even though the network was back — and gating the tick on it
       // wedged polling permanently: the app froze on "not connected" with a resting/bad-state dog and
@@ -113,7 +146,13 @@ export function usePolling(data: HomeData | undefined, paneId?: string | null): 
     const id = window.setInterval(tick, ms);
     const onWake = () => tick();
     const onVisible = () => {
-      if (!document.hidden) tick();
+      if (document.hidden) return;
+      // Coming back to the foreground is the operator saying "show me now" — see lookNow. `focus`
+      // and `online` are deliberately NOT given one: a focus fires on every tap into the window and
+      // `online` fires on a flag that is known to lie (see the tick), so either would spend a
+      // listing on something that is not somebody returning to the app.
+      lookNow(scopeRef.current);
+      tick();
     };
     window.addEventListener("focus", onWake);
     window.addEventListener("online", onWake);

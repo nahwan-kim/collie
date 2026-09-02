@@ -7,19 +7,23 @@ import type {
 } from "react";
 
 import { useOrderedKeySender } from "@/hooks/use-ordered-key-sender";
+import { t } from "@/lib/i18n";
 import { textToKeySequence } from "@/lib/key-queue";
 import { setStatus } from "@/lib/status";
 
 // Physical-keyboard events that do not change a textarea value still need wire names. Printable
 // text, spaces and line breaks normally arrive through the input/change path instead.
-const SPECIAL_KEYS: Readonly<Record<string, string>> = {
-  Escape: "Escape",
-  Tab: "Tab",
-  ArrowUp: "Up",
-  ArrowDown: "Down",
-  ArrowLeft: "Left",
-  ArrowRight: "Right",
-};
+// A Map, not an object literal: the lookup key is whatever `KeyboardEvent.key` reports, and an
+// object would answer for inherited names ("constructor", "toString") with something that is not a
+// wire key at all.
+const SPECIAL_KEYS = new Map([
+  ["Escape", "Escape"],
+  ["Tab", "Tab"],
+  ["ArrowUp", "Up"],
+  ["ArrowDown", "Down"],
+  ["ArrowLeft", "Left"],
+  ["ArrowRight", "Right"],
+]);
 
 function keyForInputType(inputType: string): string | null {
   if (inputType === "deleteContentBackward") return "Backspace";
@@ -30,7 +34,7 @@ function keyForInputType(inputType: string): string | null {
 function keyForKeyDown(key: string): string | undefined {
   if (key === "Backspace") return "Backspace";
   if (key === "Enter") return "Enter";
-  return SPECIAL_KEYS[key];
+  return SPECIAL_KEYS.get(key);
 }
 
 interface DirectTypingOptions {
@@ -112,7 +116,7 @@ export function useDirectTyping({
     // A buffered reply and live keystrokes cannot safely share one field. Keep the durable draft
     // exactly where it is and make the user send or clear it before arming direct terminal input.
     if (replyDraft().length > 0) {
-      setStatus("Send or clear the draft before typing into the terminal.", "info");
+      setStatus(t("directTyping.status.draftPending"), "info");
       return;
     }
     onActivate();
@@ -124,7 +128,7 @@ export function useDirectTyping({
     committedComposition.current = null;
     activeRef.current = true;
     setActive(true);
-    setStatus("Typing into the terminal — keys send as you type.", "success");
+    setStatus(t("directTyping.status.armed"), "success");
     // Focus synchronously while the long-press/contextmenu gesture still carries browser user
     // activation; a deferred focus selects the field but mobile browsers may refuse to open their
     // software keyboard once that activation has expired. The existing callback still runs after
@@ -180,12 +184,25 @@ export function useDirectTyping({
 
   function deactivate() {
     clearMode();
-    setStatus("Back to sending replies", "info");
+    setStatus(t("directTyping.status.disarmed"), "info");
   }
 
   function deactivateSilently() {
     clearMode();
   }
+
+  // The effects below are LIFECYCLE handlers, not reactive computations: they must fire on the
+  // condition in their dependency list and on nothing else. `clearMode`/`dropKeyboard`/`resetMode`
+  // are re-created every render, so naming them as dependencies would re-run — and in the pane-key
+  // effect, re-RESET — on every render instead. A latest-value ref says that intent outright, and
+  // keeps each effect calling the current closure rather than a stale capture.
+  const lifecycle = useRef({ clearMode, dropKeyboard, resetMode });
+  lifecycle.current = { clearMode, dropKeyboard, resetMode };
+
+  // The sender's members are destructured rather than reached through `sender.x` in a dependency
+  // list: the hook returns a fresh object each render (its `busy` flag changes as keys fly), so the
+  // OBJECT is not the dependency — these two stable callbacks are.
+  const { enqueue: enqueueKeys, reset: resetSender } = sender;
 
   // Arming dies with the view it belongs to. A backgrounded tab, an idle pause and a lost bridge
   // all mean the same thing: the mirror on screen has stopped tracking the pane, and the next
@@ -194,8 +211,8 @@ export function useDirectTyping({
   // blind. Never persisted, never restored — see the lifecycle note in send-mode-menu.tsx.
   useEffect(() => {
     if (!active || !suspended) return;
-    clearMode();
-    setStatus("Stopped typing into the terminal — the pane view was interrupted.", "info");
+    lifecycle.current.clearMode();
+    setStatus(t("directTyping.status.interrupted"), "info");
   }, [active, suspended]);
 
   // The backgrounded-tab disarm has to announce itself on the way BACK, not on the way out. A
@@ -214,16 +231,16 @@ export function useDirectTyping({
       if (document.visibilityState === "hidden") {
         if (!activeRef.current) return;
         backgrounded.current = true;
-        resetMode();
+        lifecycle.current.resetMode();
         // Put the keyboard away rather than hand the field back focused. The notice below is the
         // only thing telling you the mode is gone, and it expires; a primed field outlasts it, and
         // typing into it is exactly the mistake being warned about.
-        dropKeyboard();
+        lifecycle.current.dropKeyboard();
         return;
       }
       if (!backgrounded.current) return;
       backgrounded.current = false;
-      setStatus("Stopped typing into the terminal — the app was backgrounded.", "info");
+      setStatus(t("directTyping.status.backgrounded"), "info");
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
@@ -232,15 +249,15 @@ export function useDirectTyping({
   // Direct input never crosses a pane boundary. Reset also invalidates keys accumulated behind an
   // in-flight call; the call already on the wire captured the old pane and cannot be recalled.
   useEffect(() => {
-    resetMode();
+    lifecycle.current.resetMode();
     // The new pane's field is not the one that disarm was about — neither the blur it scheduled nor
     // the notice it owes. Dropping the debt matters because a pane can change WHILE hidden: a push
     // notification deep-links into another pane, and without this the return trip announces "the app
     // was backgrounded" over a pane the mode was never armed on.
     cancelPendingBlur();
     backgrounded.current = false;
-    sender.reset();
-  }, [paneKey, sender.reset]);
+    resetSender();
+  }, [paneKey, resetSender]);
 
   useEffect(() => cancelPendingBlur, []);
 
@@ -256,15 +273,18 @@ export function useDirectTyping({
       // the terminal. Gboard commonly marks that insertParagraph event as composing.
       if (event.isComposing && key === "Backspace") return;
       event.preventDefault();
-      sender.enqueue([key]);
+      enqueueKeys([key]);
     };
     inputEl.addEventListener("beforeinput", onBeforeInput);
     return () => inputEl.removeEventListener("beforeinput", onBeforeInput);
-  }, [active, inputRef, sender.enqueue]);
+  }, [active, inputRef, enqueueKeys]);
 
   function onChange(event: ChangeEvent<HTMLTextAreaElement>) {
     const next = event.target.value;
     setValue(next);
+    // SAFETY: a React `change` on a <textarea> is backed by the DOM `input` event, whose interface
+    // IS InputEvent — that is where `isComposing` lives. React types `nativeEvent` as the base
+    // `Event` for the synthetic ChangeEvent, which is the only reason this is written down.
     const inputEvent = event.nativeEvent as InputEvent;
     if (inputEvent.isComposing || composing.current) return;
 

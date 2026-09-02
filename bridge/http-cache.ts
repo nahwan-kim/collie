@@ -1,3 +1,4 @@
+
 // Pure, injectable HTTP cache helpers: ETag + conditional GET + gzip JSON.
 //
 // Kept separate from server.ts so they can be exercised under `bun test` without
@@ -9,11 +10,15 @@
 const GZIP_MIN_BYTES = 256;
 
 /**
- * Compute a strong ETag for the given response body string.
+ * Compute a strong ETag for the given response body.
  * Uses Bun.hash (Wyhash) — fast and deterministic within a process.
  * Returns a quoted ETag value as required by RFC 7232.
+ *
+ * Takes BYTES as well as a string because not every body the bridge validates is text: an operator's
+ * font file is a woff2, and hashing its content is what makes the tag strong rather than a guess
+ * assembled from a size and an mtime.
  */
-export function computeEtag(body: string): string {
+export function computeEtag(body: string | Uint8Array): string {
   // toString(16) works for both number and bigint, which covers all Bun.hash overloads.
   return `"${Bun.hash(body).toString(16)}"`;
 }
@@ -37,8 +42,20 @@ export function notModified(ifNoneMatch: string | null, etag: string): boolean {
  * - `extraHeaders` are merged in after the standard headers so callers can attach
  *   an ETag or other fields (e.g. `{ etag: '"abc"' }`).
  */
-export function gzipJsonResponse(
-  data: unknown,
+/**
+ * The headers this module composes: the two it always sets, the two the gzip branch adds, and
+ * whatever the caller attached. Named rather than a bare `Record<string, string>` so the four keys
+ * this function owns are visible in the type.
+ */
+type ResponseHeaders = {
+  "content-type": string;
+  "cache-control": string;
+  "content-encoding"?: string;
+  vary?: string;
+} & Record<string, string>;
+
+export function gzipJsonResponse<TBody>(
+  data: TBody,
   acceptEncoding: string | null,
   extraHeaders: Record<string, string> = {},
 ): Response {
@@ -48,7 +65,7 @@ export function gzipJsonResponse(
     acceptEncoding.includes("gzip") &&
     body.length >= GZIP_MIN_BYTES;
 
-  const headers: Record<string, string> = {
+  const headers: ResponseHeaders = {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     ...extraHeaders,

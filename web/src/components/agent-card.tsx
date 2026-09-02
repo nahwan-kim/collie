@@ -4,10 +4,14 @@ import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { ShellBadge, StatusBadge, StatusDot } from "@/components/status-badge";
 import { AgentIcon } from "@/components/agent-icon";
+import { HostChip } from "@/components/host-chip";
+import { SessionChip } from "@/components/session-chip";
+import { PaneHint } from "@/components/pane-hint";
 import { timeAgoShort } from "@/lib/format";
 import { paneParts, paneTitleInTab } from "@/lib/pane-name";
-import { STATUS_LABEL } from "@/lib/types";
+import { statusLabel } from "@/lib/types";
 import type { AgentView } from "@/lib/types";
+import { useLocale } from "@/hooks/use-locale";
 
 interface AgentCardProps {
   agent: AgentView;
@@ -63,6 +67,7 @@ export function AgentCard({
   statusStyle = "badge",
   density = "card",
 }: AgentCardProps) {
+  useLocale();
   const isShell = agent.kind === "shell";
   const blocked = agent.status === "blocked";
   const inTab = scope === "tab";
@@ -83,27 +88,45 @@ export function AgentCard({
       onClick={onClick}
       className={cn(
         "w-full text-left transition-transform active:scale-[0.99]",
-        // No radius on a flat row. These sit in a `divide-y` list, and a rounded hover fill under a
-        // full-width straight hairline reads as a rendering fault — the corners pull away from a
-        // line that doesn't follow them. A radius here would need a real border to belong to; the
-        // rows that DO have one (blocked) keep theirs below.
+        // No radius on a flat row, in ANY state. These sit in a `divide-y` list, and a rounded fill
+        // under a full-width straight hairline reads as a rendering fault — the corners pull away
+        // from a line that doesn't follow them. Corners belong to where the row sits, never to what
+        // it is doing, so a blocked flat row stays square too and takes a left rail instead.
         flat && "transition-colors hover:bg-muted/50",
       )}
     >
       <Shell
         className={cn(
-          // The 15px inset matches the card's 14px padding + 1px border, so the avatar column runs
-          // straight down the page instead of stepping 5px sideways at each section boundary.
+          // 14px, the same as the card's own padding. A flat row now sits inside a 1px-bordered
+          // ListGroup, so its content lands on the same x as a card row's content BY CONSTRUCTION
+          // (14 + 1 on both sides) — the hand-computed 15px this replaced was faking exactly that
+          // alignment against a group that had no border to supply the 1px. The rail below is a
+          // box-shadow, which takes no room, so the number still holds.
           flat
-            ? "flex flex-row items-center gap-3 px-[0.9375rem] py-2.5"
+            ? "flex flex-row items-center gap-3 px-3.5 py-2.5 shadow-[inset_2px_0_0_0_transparent]"
             : "flex-row items-center gap-3 rounded-xl px-3.5 py-3 shadow-sm",
           // The blocked tint survives both treatments — it's the one cue that reads at a glance.
-          blocked && "border-status-blocked/40 bg-status-blocked/5",
+          // The EDGE cannot: one class string, two containers. A card sits in a gap list and already
+          // carries a border in every state, so it only recolours. A flat row sits in a divide-y
+          // list, where a four-sided edge would double the hairline — and where a bare colour
+          // utility paints nothing at all, because preflight leaves the width at 0. So the flat row
+          // takes a 2px left rail, reserved transparent above so the box never changes.
+          blocked &&
+            (flat
+              ? "bg-status-blocked/5 shadow-[inset_2px_0_0_0_var(--color-status-blocked)]"
+              : "border-status-blocked/40 bg-status-blocked/5"),
         )}
       >
         <div className="relative shrink-0">
+          {/* An avatar is a FRAME around someone else's artwork, not a shape that means something, so
+              the whole family — this shell tile, the same tile in `agent-chat.tsx`, and the branded
+              `AgentIcon` beside it — is framed at the house radius. A circle would crop the artwork,
+              which is why `agent-icon.tsx` carried its own 22% radius before this; one slot may not
+              hold two shapes for one role. Full-round stays RESERVED for things that are a circle in
+              meaning: status dots (the corner dot just below), the switch thumb, round icon buttons.
+              Don't "fix" one of the three back to `rounded-full`. */}
           {isShell ? (
-            <div className="flex size-9 items-center justify-center rounded-full border bg-muted">
+            <div className="flex size-9 items-center justify-center rounded-md border bg-muted">
               <TerminalSquare className="size-4 text-muted-foreground" />
             </div>
           ) : (
@@ -125,9 +148,7 @@ export function AgentCard({
 
         <div className="min-w-0 flex-1">
           {inTab ? (
-            <div className="flex min-w-0 items-baseline gap-2">
-              <span className="min-w-0 flex-1 truncate font-medium">{tabTitle.primary}</span>
-            </div>
+            <div className="truncate font-medium">{tabTitle.primary}</div>
           ) : (
             <div className="flex min-w-0 items-baseline gap-1">
               {/* With a tab present the project yields width first (capped, truncatable) and the
@@ -151,26 +172,42 @@ export function AgentCard({
                   <span className="min-w-0 flex-1 truncate font-medium">{parts.tab}</span>
                 </>
               )}
-              {/* The age rides the title row: alone on a line of its own it claimed the same
-                  vertical presence as the title, for a footnote. */}
-              {stamp !== undefined && <Age at={stamp} />}
             </div>
           )}
 
           {/* Only rendered when there's something to say — most rows are one line now. */}
           {secondary && (
-            <div className="flex min-w-0 items-baseline gap-2 text-xs text-muted-foreground">
-              <span className="min-w-0 flex-1 truncate font-mono">{secondary}</span>
-              {inTab && stamp !== undefined && <Age at={stamp} />}
-            </div>
+            <div className="truncate font-mono text-xs text-muted-foreground">{secondary}</div>
           )}
+
+          {/* The bridge's own sentence about this pane, when it sent one — text, never a branch
+              (components/pane-hint.tsx). It changes nothing about the row: a hinted pane is still a
+              shell, still sorts where an unknown status sorts, and still opens the same view. */}
+          <PaneHint hint={agent.hint} />
+        </div>
+
+        {/* The trailing meta is a COLUMN, not a tail on the title. Inside the title line the chip
+            was 4px from a truncated word and competed with the discriminator for the same width;
+            here the title takes its natural width, the secondary line runs the full width beneath
+            it, and the chip is centred against the whole row by the shell's own `items-center`.
+            Costs no height — the row pitch is unchanged. HostChip self-hides: nothing renders
+            unless the snapshot lists more than one machine (components/host-chip.tsx), so on a solo
+            install this column collapses to the age alone, or to nothing. */}
+        <div className="flex shrink-0 items-center gap-2">
+          {/* The row's ADDRESS, both halves, in the order the address itself reads: which machine,
+              then which session on it. Each self-hides — the host when there is no pack, the session
+              when the row is in the primary one or the list was never widened — so on every install
+              that exists today this column is still the age alone, or nothing. */}
+          <HostChip host={agent.host} />
+          <SessionChip session={agent.session} />
+          {stamp !== undefined && <Age at={stamp} />}
         </div>
 
         {isShell ? (
           <ShellBadge />
         ) : cornerDot ? (
           /* The dot itself is colour-only and lives on the avatar; give SR users the word. */
-          <span className="sr-only">{STATUS_LABEL[agent.status]}</span>
+          <span className="sr-only">{statusLabel(agent.status)}</span>
         ) : (
           <StatusBadge status={agent.status} />
         )}

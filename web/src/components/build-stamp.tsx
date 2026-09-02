@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 
+import { useLocale } from "@/hooks/use-locale";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { fetchConfig } from "@/lib/api";
 import { BUILD, buildLabel, isStaleBuild } from "@/lib/build";
@@ -14,6 +16,7 @@ import { checkForUpdate } from "@/lib/pwa";
 // one-tap update — appearing/disappearing in real time as the server rebuilds. See README →
 // Troubleshooting.
 export function BuildStamp({ className }: { className?: string }) {
+  useLocale();
   const serverBuild = useServerBuild();
   const [updating, setUpdating] = useState(false);
   useEffect(() => {
@@ -22,13 +25,14 @@ export function BuildStamp({ className }: { className?: string }) {
     // the footer is correct even before the first poll lands — and so an older bridge that reports
     // `build` in JSON but sends no header still works. Only seed when nothing's been observed yet
     // (the config response's own header usually already has), so we don't double-count an observation.
-    fetchConfig()
-      .then((c) => {
+    void (async () => {
+      try {
+        const c = await fetchConfig();
         if (alive && getServerBuild() === undefined) observeServerBuild(c.build);
-      })
-      .catch(() => {
+      } catch {
         /* offline / bridge down — just show the local stamp */
-      });
+      }
+    })();
     return () => {
       alive = false;
     };
@@ -50,6 +54,9 @@ export function BuildStamp({ className }: { className?: string }) {
         className,
       )}
     >
+      {/* Monospaced because the label carries the git hash — the operator reads it character by
+          character against a `git log`, which is the one thing a proportional face makes harder.
+          The bare semver in alpha-bar.tsx is chrome and wears the UI face; this is not. */}
       <span className="font-mono">{buildLabel()}</span>
       {stale && (
         <>
@@ -63,10 +70,10 @@ export function BuildStamp({ className }: { className?: string }) {
             {updating ? (
               <span className="inline-flex items-center gap-1 align-middle">
                 <Loader2 className="size-3 animate-spin" />
-                updating…
+                {t("settings.buildStamp.updating")}
               </span>
             ) : (
-              "new build — tap to update"
+              t("settings.buildStamp.tapToUpdate")
             )}
           </button>
         </>

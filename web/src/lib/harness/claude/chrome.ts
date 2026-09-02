@@ -9,6 +9,7 @@
 // matched by POSITION (below the box's bottom border), never by its content strings.
 
 import type { StyledLine } from "../../blocks";
+import { findAutocompleteRun } from "./autocomplete";
 import { isBlank, isBoxBorder, isInputBoxTopBorder, lineText } from "./markers";
 
 // Rows allowed DIRECTLY under the input box's bottom border: the statusline plus its hint row(s)
@@ -42,9 +43,75 @@ const MAX_FOOTER_LINES = 8;
 const MAX_DRAFT_LINES = 100;
 
 // Text Claude draws on the "❯" prompt line that is NOT a real user draft — it's a hint the TUI paints
-// when the box is otherwise empty. Must never be surfaced as a recoverable draft. Kept as an array so
+// when the box is otherwise empty. Must never be surfaced as a recoverable draft. Kept as a set so
 // more variants can be added without touching the extraction logic.
-const INPUT_PLACEHOLDERS = ["Press up to edit queued messages"];
+const INPUT_PLACEHOLDERS = new Set(["Press up to edit queued messages"]);
+
+/**
+ * GHOST TEXT — the generated "suggested next prompt" a newer Claude Code paints inside an otherwise
+ * empty input box (a whole plausible message: "fix it", "run the tests", …). It is NOT a draft: it is
+ * a suggestion the operator has not written and, until they act on it, the box is empty.
+ *
+ * Content cannot tell the two apart — the suggestion is arbitrary generated prose and changes every
+ * turn, so INPUT_PLACEHOLDERS (which knows one fixed literal) can never grow to cover it. STYLE can.
+ * Measured on a live Claude Code v2.1.235 pane through the bridge (2026-08-19): the prompt line comes
+ * over the wire as
+ *
+ *     ❯ \x1b[0m\x1b[2mfix it\x1b[0m
+ *
+ * — the suggestion is a run of SGR 2 (faint) with no colour of its own, while the "❯" marker and every
+ * real draft on the same line carry no SGR at all (`dim: false`). Typing replaces the suggestion
+ * outright, so a box never holds both at once; that is what makes "EVERY visible run is faint" sound
+ * as the whole-box test rather than a per-run one.
+ *
+ * Three consequences follow from misreading one as a draft, and all three are fixed by classifying it
+ * here, at the single place a draft is derived (lib/reply-action.ts and composer.tsx both take their
+ * draft from `extractInputDraft`, so neither needs its own ghost test):
+ *
+ *  1. the app offered to "recover" a stranded draft the operator never wrote;
+ *  2. the composer's pre-clear sweep fired `ctrl+k` + a burst of Backspaces at it — and the ghost is
+ *     not editable text, so it clears NOTHING (verified live: after a full sweep the same faint run is
+ *     still on the line). Destructive keys, no effect, every send;
+ *  3. worst, it could VOUCH FOR A SEND THAT NEVER LANDED. `draftCarriesSend` accepts a draft whose
+ *     visible characters appear contiguously in the sent text, so a suggestion that happens to be an
+ *     8-character substring of the message ("fix the parser…" vs a ghost "fix the ") would satisfy the
+ *     guard against a box our text never reached — Collie then fires the submit key and reports
+ *     `sent`, and the message is lost. Returning null here keeps a ghost out of that comparison
+ *     entirely, which is the defense in depth: the guard never sees a ghost to be fooled by.
+ *
+ * A false POSITIVE is survivable in the one direction that matters: if a genuine draft were ever
+ * painted faint we would neither preview nor sweep it, `pane.send_text` would append to it, and the
+ * appended line would then fail `draftCarriesSend` — the send stalls with nothing submitted, which is
+ * this module's designed failure mode. A false NEGATIVE (treating a ghost as a draft) is the bug above.
+ *
+ * `hasInputBox`/`composerReady` deliberately do NOT consult this: a box holding ghost text is a real,
+ * typeable box, and refusing to type into it would break every send after the first turn.
+ */
+function inputBoxHoldsGhostText(lines: StyledLine[], box: InputBox): boolean {
+  let sawContent = false;
+  for (let j = box.prompt; j < box.bottomBorder; j++) {
+    // The "❯" marker is unstyled and may share a segment with the text that follows it (a real draft
+    // arrives as one segment, "❯ hello"), so it is stripped from the text rather than skipped as a
+    // segment — otherwise the marker's own non-faint run would answer "not a ghost" every time.
+    let beforeMarker = j === box.prompt;
+    for (const seg of lines[j]!.segments) {
+      let text = seg.text;
+      if (beforeMarker) {
+        const head = text.trimStart();
+        if (!head.startsWith("❯")) {
+          if (head.length === 0) continue; // indent ahead of the marker
+        } else {
+          text = head.slice(1);
+          beforeMarker = false;
+        }
+      }
+      if (text.trim().length === 0) continue;
+      if (seg.dim !== true) return false;
+      sawContent = true;
+    }
+  }
+  return sawContent;
+}
 
 /**
  * Return `lines` with any confidently-matched trailing chrome removed. When nothing matches the
@@ -120,7 +187,8 @@ export function extractStatusLines(lines: StyledLine[]): StyledLine[] {
  * WRAPS onto continuation lines inside the box; those are folded back in (each trimmed of its
  * alignment indent, joined with a single space — Claude soft-wraps at word boundaries, so the dropped
  * break was a space). Returns `null` when there's no input box at the tail, the box is empty (bare
- * "❯"), or the line is a known TUI placeholder (INPUT_PLACEHOLDERS) rather than a real draft.
+ * "❯"), the box holds GHOST TEXT (a generated suggestion — see inputBoxHoldsGhostText), or the line is
+ * a known TUI placeholder (INPUT_PLACEHOLDERS) rather than a real draft.
  */
 export function extractInputDraft(lines: StyledLine[]): string | null {
   const texts = lines.map(lineText);
@@ -130,6 +198,9 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
 
   const box = locateInputBox(texts, end);
   if (box === null) return null;
+  // Style first, content second: a generated suggestion is arbitrary prose, so only how it is PAINTED
+  // separates it from a draft (see inputBoxHoldsGhostText).
+  if (inputBoxHoldsGhostText(lines, box)) return null;
 
   let head = texts[box.prompt]!.trimStart();
   if (head.startsWith("❯")) head = head.slice(1);
@@ -141,7 +212,7 @@ export function extractInputDraft(lines: StyledLine[]): string | null {
     if (t.length > 0) parts.push(t);
   }
   const draft = parts.join(" ").trim();
-  if (draft.length === 0 || INPUT_PLACEHOLDERS.includes(draft)) return null;
+  if (draft.length === 0 || INPUT_PLACEHOLDERS.has(draft)) return null;
   return draft;
 }
 
@@ -194,8 +265,41 @@ interface InputBox {
  *
  * return the top and bottom border indices plus the prompt-line index. Otherwise null. Scans
  * bottom-up.
+ *
+ * The SLASH-AUTOCOMPLETE POPUP is peeled off the tail FIRST, before any of that. While the operator
+ * is typing a slash command, Claude replaces the statusline with its completion list — a run of
+ * entry/continuation rows directly under the bottom border, 23 rows for `/model` on a machine with
+ * many skills. That run is far taller than MAX_STATUS_LINES, so step (b) below used to eat the cap
+ * and step (c) never reached the border: the box went undetected, `hasInputBox` (and therefore
+ * `composerReady`) read false, and every send stalled while the draft sat in a live input box.
+ *
+ * The cap is NOT raised to cover it, per .adr/0004: the row count is not what protects this walk, and
+ * a taller blind window admits more screens it should refuse. Instead the popup is matched by its own
+ * SHAPE (./autocomplete.ts) and removed from the tail, and the ordinary walk then runs from the row
+ * above it — seeing exactly what it would have seen if the popup were not painted at all.
+ *
+ * The peel is confirmed, not assumed: the box it produces must hold a draft that STARTS WITH "/",
+ * which is the only condition under which Claude paints this popup at all. When it doesn't (or when
+ * no popup matches), the walk runs unchanged from `end`, so nothing that worked before can regress.
  */
 function locateInputBox(texts: string[], end: number): InputBox | null {
+  const popup = findAutocompleteRun(texts, end);
+  if (popup !== null) {
+    const box = walkInputBox(texts, popup.start);
+    if (box !== null && promptIsSlashCommand(texts, box)) return box;
+  }
+  return walkInputBox(texts, end);
+}
+
+/** Whether the box's "❯" line holds a slash command — the draft state that puts the completion popup
+ *  on screen. Claude renders a U+00A0 after the marker, which JS `trim()` strips. */
+function promptIsSlashCommand(texts: string[], box: InputBox): boolean {
+  const head = texts[box.prompt]!.trimStart();
+  return (head.startsWith("❯") ? head.slice(1) : head).trim().startsWith("/");
+}
+
+/** The walk itself: steps (a)-(e) from the shape above, bottom-up from `end` (exclusive). */
+function walkInputBox(texts: string[], end: number): InputBox | null {
   let i = end - 1;
 
   // (a) Optional background-agents footer at the very tail (a newer Claude Code UI): a non-blank run

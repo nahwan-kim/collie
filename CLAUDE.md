@@ -1,12 +1,16 @@
 # CLAUDE.md — working agreement for this repo
 
-**Collie** (repo `AltanS/collie`) — a phone web UI for your Herdr agent herd, served over
-Tailscale. A mobile-first PWA (Vite + React + TS + Tailwind v4 + shadcn) plus a Bun/TS bridge that
-talks to Herdr's Unix socket, letting you monitor and reply to agents from a phone. The Herdr
-plugin id is `herdr.collie` (manifest: `herdr-plugin.toml`). Orientation:
-[`README.md`](./README.md) · [`ARCHITECTURE.md`](./ARCHITECTURE.md) · verified API
-[`HERDR_API.md`](./HERDR_API.md) · decisions [`.adr/`](./.adr/) · adding a harness
-[`HARNESS_CONTRIBUTING.md`](./HARNESS_CONTRIBUTING.md).
+**Collie** (repo `AltanS/collie`) — a phone web UI for the AI agents running in your terminal,
+served over Tailscale. A mobile-first PWA (Vite + React + TS + Tailwind v4 + shadcn) plus a Bun/TS
+bridge that mirrors ONE multiplexer per install — Herdr, tmux or zellij — letting you monitor and
+reply to agents from a phone. Herdr is one adapter among the three, not the product: it is the
+default, it is the only one that talks over a Unix socket, and its plugin route stays supported —
+plugin id `herdr.collie` (manifest: `herdr-plugin.toml`). Orientation:
+[`README.md`](./README.md) · [`ARCHITECTURE.md`](./ARCHITECTURE.md) · the UI's visual
+language [`DESIGN.md`](./DESIGN.md) · verified API [`HERDR_API.md`](./HERDR_API.md) ·
+decisions [`.adr/`](./.adr/) · adding a harness
+[`HARNESS_CONTRIBUTING.md`](./HARNESS_CONTRIBUTING.md) · adding a multiplexer
+[`MUX_CONTRIBUTING.md`](./MUX_CONTRIBUTING.md).
 
 ## Decision records — read before reopening a settled question
 
@@ -21,7 +25,7 @@ mark it superseded and write the next one.
 
 ## Versioning — MANDATORY
 
-This plugin is **SemVer**ed, and the version is **enforced**, so it never silently drifts.
+Collie is **SemVer**ed, and the version is **enforced**, so it never silently drifts.
 
 **The version lives in three files that must always agree, plus a matching CHANGELOG entry:**
 `herdr-plugin.toml` (canonical — Herdr reads it) · `package.json` · `web/package.json` ·
@@ -60,18 +64,44 @@ a fork PR does carry a release commit, cherry-pick the functional commits with `
 Doc-only changes (`*.md`) don't need a bump. This is enforced two ways, but **you are the first
 line — do it as part of the change, not after**:
 
-- `scripts/check-version.sh` runs inside `scripts/collie-ctl.sh build` (a release can't build while
-  versions disagree).
+- `scripts/check-version.sh` runs inside `collie build` (a release can't build while versions
+  disagree).
 - A **git pre-commit hook** (`scripts/git-hooks/pre-commit`, activate once with
   `scripts/install-hooks.sh`) blocks commits where functional code changed but the version didn't.
-  Escape hatch for a single commit: `SKIP_VERSION_CHECK=1 git commit …`.
+  Escape hatch for a single commit: `SKIP_VERSION_CHECK=1 git commit …` (every `SKIP_*` hatch is
+  listed under *Linting* below).
 
-**Tag the release when you push it.** Cutting a release means the three version files + the newest
-`CHANGELOG.md` heading agree on `x.y.z` (steps 1–3). When that release lands on `main` and you push,
-**always push a matching annotated git tag with it** — `git tag -a vX.Y.Z -m "Collie X.Y.Z" && git
-push origin vX.Y.Z` (or `git push --follow-tags` so the tag ships *with* the release). One `v<x.y.z>`
-tag per shipped version on the remote. Not hook-enforced — it's on you. (Adding/adjusting this note is
-a doc-only change and needs no version bump.)
+**Publish every release you cut — tag it when you push it.** Cutting a release means the three
+version files + the newest `CHANGELOG.md` heading agree on `x.y.z` (steps 1–3). A cut version that
+never gets a tag is not a release at all: `.github/workflows/release.yml` triggers on
+`push: tags: ["v*.*.*"]` and nothing else creates the GitHub Release the in-app update banner links
+to, so an untagged version exists only as a CHANGELOG heading and nobody can install it. So when
+that release lands and you push, **always push a matching annotated git tag with it** —
+`git tag -a vX.Y.Z -m "Collie X.Y.Z" && git push origin vX.Y.Z` (or `git push --follow-tags` so the
+tag ships *with* the release). One `v<x.y.z>` tag per shipped version on the remote.
+
+`scripts/check-tag.sh` checks this: with no arguments it asks whether the version the repo currently
+claims has a tag; given a rev-list selector it asks the same of every `chore(release):` commit the
+selector picks, reading the version from *that commit's* manifest. The **pre-push hook runs it over
+the range being pushed and WARNS** — loudly, last, with the exact `git tag -a` command. It warns
+rather than blocks because the tag may legitimately be cut after CI has looked at the release
+commit; skip it once with `SKIP_TAG_CHECK=1 git push`. Nothing checks the remote, so the last step is
+still yours.
+
+**Betas 33 to 41 are unreachable on purpose. Do not back-fill them.** They were cut in the version
+files and the CHANGELOG and never tagged — not even locally — which is the failure the guard above
+exists to stop repeating. Their commits are superseded by the betas that followed, and a tag cut
+today would claim a release nobody ever tested.
+
+**Update notice (user-facing).** The app's in-app update banner links to the newest release's GitHub
+page and shows the command to run. Pushing a `v*` tag auto-creates that GitHub Release (with the
+commands) via `.github/workflows/release.yml`. **On a Herdr-managed install, always express
+user-facing update/restart instructions as Herdr plugin actions** — `herdr plugin action invoke
+update --plugin herdr.collie` (or `restart`) — never `bin/collie …` / `systemctl … collie`, which
+depend on the caller's cwd and the unit name; the Herdr action runs from anywhere. A **binary
+install** (`scripts/install.sh`'s versioned layout) is not a Herdr plugin and has no such actions:
+there the spelling is `collie update` / `collie restart`, and a string that may be read on either
+kind must come from the install kind (`cli/install-kind.ts`), never assume one.
 
 **Update notice (user-facing).** The app's in-app update banner links to the newest release's GitHub
 page and shows the command to run. Pushing a `v*` tag auto-creates that GitHub Release (with the
@@ -82,6 +112,16 @@ the unit name; the Herdr action runs from anywhere.
 
 ## Build / run (operational facts that are easy to forget)
 
+- **Every verb is spelled `bin/collie <verb>`** and implemented once, in `cli/`.
+  `scripts/collie-ctl.sh <verb>` is a bootstrap shim that compiles the binary when the checkout has
+  none and `exec`s it — it implements nothing, and its path is frozen because Herdr <0.8.0 invokes
+  the action set cached at install time
+  ([ADR 0006](./.adr/0006-update-advances-the-checkout-herdr-installed.md)). Teach the binary; don't
+  add logic to the shim.
+- **`collie link` publishes `~/.local/bin/collie` as a SYMLINK to the checkout's binary** — never a
+  copy, never a wrapper script, and never as a side effect of `build`/`update`
+  ([ADR 0021](./.adr/0021-the-path-name-is-a-pointer-never-a-copy.md)). `unlink` removes that name
+  only when it points at this checkout.
 - **There are two checkout shapes, and `update` handles both.** `herdr plugin install` does not clone
   — it leaves a **detached, shallow** checkout, so `git pull` cannot run there; a linked clone sits on
   a branch. One predicate (`git symbolic-ref -q HEAD`) picks the strategy, and the same predicate
@@ -93,15 +133,24 @@ the unit name; the Herdr action runs from anywhere.
   a rebuild is **immediately live — no restart**.
 - **Backend changes** (`bridge/*.ts`): Bun does **not** hot-reload the service — you must
   `systemctl --user restart collie`. Forgetting this is the #1 "my change didn't take" trap.
-- `bun run build` (root) and `collie-ctl.sh build` **typecheck both sides first** (root tsc + web
-  tsc), then build web to `dist-staging` and swap it in atomically — a failed build never empties a
-  live `web/dist`. Bare `cd web && bun run build` still skips typechecking; don't ship from it.
+- `bun run build` (root) is now **one definition**: it runs `collie build`, which gates on
+  `scripts/check-version.sh`, installs both trees, **typechecks both sides** (root tsc + web tsc),
+  compiles `bin/collie`, builds web to `dist-staging`, and swaps both artifacts in **last** — a
+  failed build never empties a live `web/dist` and never replaces the running binary. The binary is
+  always renamed into place, never written through (the running service keeps its old inode until
+  it restarts). Bare `cd web && bun run build` skips all of that; don't ship from it.
+- **Typecheck, and the trap in it:** the ROOT `bun run typecheck` does **not** cover `web/`'s test
+  files. Only `cd web && bun run typecheck` does. So a change to a shared type can leave the root
+  check green while `bun run build` — and therefore `make deploy` — fails on stale test fixtures.
+  Run **both**, every time: `bun run typecheck` at the root *and* `cd web && bun run typecheck`.
+  This has shipped a broken tip to `origin/v1` once; it is not theoretical.
 - **Tests:** frontend `cd web && bun run test` (Vitest + jsdom + Testing Library + MSW; no headless
   browser); backend `bun run test` at the root — Bun's own runner over every pure-logic module in
   `bridge/` (access checks, state engine, config, journal adapters, notifications, uploads, …) plus
-  `scripts/collie-ctl.test.sh`, which exercises the ctl lifecycle in a sandboxed HOME.
+  `scripts/collie-cli.test.sh`, which drives every verb of the compiled binary in a sandboxed HOME,
+  and `scripts/collie-ctl.test.sh`, which pins the shim's delegation and bootstrap.
   A **pre-push hook** (`scripts/git-hooks/pre-push`) runs **both** before
-  every push — override once with `SKIP_TESTS=1 git push`. The bits that genuinely need `Bun.serve` /
+  every push — override once with `SKIP_TESTS=1 git push` (see *Linting* → escape hatches). The bits that genuinely need `Bun.serve` /
   `Bun.connect` (HTTP handlers, the socket client) stay unit-untested — Vitest-on-Node can't run them,
   so keep new backend logic pure/injectable enough for `bun test`, or exercise it through `web/`.
 - Service: `systemd --user` unit `collie` on the deployment host; logs `journalctl --user -u collie -f`.
@@ -114,8 +163,64 @@ the unit name; the Herdr action runs from anywhere.
   shorthand there). The **bridge** tsconfig does not enable those two — bridge code uses
   parameter-property shorthand by convention; keep each side consistent with itself.
 
+## Linting — one linter, one config
+
+- **oxlint is the linter and `bun run lint` is how you run it** — oxlint's own
+  correctness/suspicious/perf catalog plus all 15 rules of the vendored
+  [anti-slop](./tools/oxlint/README.md) plugin, at `error`. Don't add ESLint or biome
+  ([ADR 0019](./.adr/0019-oxlint-and-vendored-anti-slop-are-the-lint-gate.md)).
+- **One config, `.oxlintrc.json` at the root** — the editor, the PostToolUse hook, pre-commit and
+  CI all shell out to it with no flags of their own. `web/` has no lint script;
+  the root config already covers `web/src`. Only the **full-tree** run (CI) defines "passing".
+- **`collie build` does NOT lint, and must not learn to.** `build` is the operator's path — a clean
+  install and `update` both run it on the operator's machine — and oxlint's allocator SIGABRTs below
+  roughly 7 GB of RAM, which bricked installs on ordinary boxes (1.0.0-beta.44). The mux-name check
+  left with it; CI covers it through `scripts/check-mux-names.test.ts`.
+- **A finding is fixed in the code, never suppressed and never cleared by downgrading a rule.**
+  There are zero `oxlint-disable` comments in the tree and that is the policy. A `// SAFETY:`
+  comment must state the invariant that makes the assertion sound — "safe, trust me" clears the
+  rule and fails review.
+- **Changing what's enforced goes through the rationale table in
+  [ADR 0019](./.adr/0019-oxlint-and-vendored-anti-slop-are-the-lint-gate.md)**, which also holds the
+  fix-shapes for the rules you'll trip most and the reasoning for the scoped `no-runtime-typeof`
+  parse-boundary overrides. Per-rule reasons live as comments at the rule in `.oxlintrc.json`.
+- **Don't edit `tools/oxlint/anti-slop/`** — it's a vendored copy, overwritten at the next
+  re-vendor. Re-pinning upstream is the maintainer's deliberate act, and the diff gets a human
+  read: vendored code is copied, not installed, so the 7-day dependency age gate never sees it.
+- **`overrides.files` globs match the full path** — a glob must start with `**/` or it silently
+  matches nothing. Verify any new one with a planted violation in-scope and a negative control out.
+
+### Escape hatches (all of them, in one place)
+
+Each guard has its own name on its own surface, so skipping one never disarms another. Use one for
+a single command; never export one.
+
+| variable | surface | skips |
+| --- | --- | --- |
+| `SKIP_VERSION_CHECK=1` | `git commit` (pre-commit hook) | the version-consistency + bump-on-change guard |
+| `SKIP_LINT_CHECK=1` | `git commit` (pre-commit hook) | oxlint over the staged files |
+| `SKIP_PACK_WIRE_CHECK=1` | `git commit` (pre-commit hook) | the pack-wire decision guard |
+| `SKIP_TYPECHECK=1` | `bun run build` / `collie build` | both typecheck steps |
+| `SKIP_TESTS=1` | `git push` (pre-push hook) | both test suites |
+| `SKIP_TAG_CHECK=1` | `git push` (pre-push hook) | the untagged-release warning |
+
+The pre-commit hook's three guards are **independent** — `SKIP_VERSION_CHECK=1` does not disarm the
+lint guard or the pack-wire guard.
+
 ## Frontend data layer (React Router, not TanStack)
 
+- **The UI has a written design language — read [`DESIGN.md`](./DESIGN.md) before building a
+  visual component.** Its first rule is the one that keeps getting broken: look in
+  `web/src/components/ui/` for an existing primitive, and promote one the moment a second
+  place needs the same visual idea. It also holds the no-shift rule, the radius and line
+  tokens, the mono-vs-sans split, and the Tailwind v4 traps that each cost a day.
+- **Before adding any recurring visual pattern, check `web/src/components/ui/` for the
+  primitive; if none exists, the primitive comes first, in its own commit.** A pattern built at
+  a call site first is one that never gets promoted — the alert family cost six components that way.
+- **Check UI states in the playground** (`web/src/playground/`, `cd web && bun run playground`,
+  README → "The states playground") before changing a banner, the mark, the boot splash, the idle
+  lock, or the pack page — it renders every state at once. Never import playground code from app
+  code.
 - Data flows through **React Router** (`createBrowserRouter`, data mode): route **loaders**
   (`web/src/lib/loaders.ts`) fetch the snapshot + pane; **polling is `useRevalidator()` on an
   adaptive interval** (`web/src/hooks/use-polling.ts`); mutations are direct `lib/api.ts` calls
@@ -132,6 +237,10 @@ the unit name; the Herdr action runs from anywhere.
   read-only, idle pause), a hidden page, and a failed batch — never persisted, never restored. Don't
   lift it, and don't add the reply guard's `composerReady` pre-flight to it; the reasoning for both
   sits in `web/src/components/send-mode-menu.tsx`'s header.
+- **The phone moves the operator's terminal only on the "Show in terminal" tap** (`setFocus`, one
+  row in the pane sheet). `MuxPane.focused` is a fact the snapshot reports, and the terminal never
+  moves the phone in the other direction — that may not become a side effect of navigation
+  ([ADR 0031](./.adr/0031-freshness-is-a-declared-promise.md)).
 - **The operator's rows in `commands.toml` replace the shipped command catalog on the panes they
   address, never merge into it** ([ADR 0018](./.adr/0018-operator-command-rows-replace-the-catalog.md));
   the bridge re-reads the file behind an mtime check, so edits are live and need no restart.
@@ -143,9 +252,28 @@ the unit name; the Herdr action runs from anywhere.
   dock's shipped phrases on the panes they address (ADR 0018 once more), shell panes included when
   a row is scoped to them. Same reader, same scope ladder: the three files differ in grammar and
   never in posture, so teach all three or none.
+- **`theme.toml` is the operator's fourth file, and it is the one that ADDS rather than replaces** —
+  its `[[font]]` rows put extra UI typefaces UNDER the shipped three in the Settings picker, and the
+  bridge serves the files read-only from `<config-dir>/fonts` at `GET /api/fonts/<basename>`. Same
+  reader, same mtime liveness; the opposite posture, because a font cannot fire an action and so
+  shadows nothing ([ADR 0033](./.adr/0033-the-app-face-is-a-device-preference.md)). Don't dilute
+  ADR 0018's replace-law to cover it.
+- **Every user-facing string goes through `t()`/`tn()` from `@/lib/i18n`**, and a component that
+  calls them subscribes via `useLocale()` so it re-renders on a locale (or lazy-dictionary) change.
+  `messages/en.ts` is the source of truth; all six dictionary files change together, enforced by
+  `tsc`. Not translated: terminal/agent output, quick replies, menu/dialog labels the screen printed,
+  key caps, pack role names, push notifications, service-worker strings, pack-link errors, and the
+  slash-command descriptions in `web/src/lib/agent-commands.ts` (another tool's vocabulary — deferred)
+  ([ADR 0030](./.adr/0030-the-ui-is-translated-by-a-typed-dictionary-not-a-library.md)).
 - **PWA** via `vite-plugin-pwa` (`web/vite.config.ts`): manifest + `sw.js`, registered manually
   from `virtual:pwa-register` in `main.tsx` (bundled = CSP-safe). Install/SW need a **secure
   context** — over plain HTTP they no-op silently (Chrome insecure-origin flag, or HTTPS, to test).
+- **The app's UI typeface is a per-device SETTING, not the maker's choice** — System / Space Grotesk /
+  Aldrich (default), plus whatever the operator declared, applied pre-paint as a root class by
+  `web/public/theme-init.js` and stored in `collie:design:v1` (`web/src/lib/design.ts`). CSS owns
+  every stack; JavaScript only swaps a class name. What survives the reversal is the other half of
+  the rule: **the chosen face never dresses agent-authored text** — `font-mono` and `font-content`
+  are untouched by it ([ADR 0033](./.adr/0033-the-app-face-is-a-device-preference.md)).
 - **The bundled Nerd Font subsets stay lazy and out of the precache** — `unicode-range` per face,
   version in the filename, cached first-use by `sw.ts`. Don't add them to `globPatterns`, don't
   widen a range, don't move subsetting into the build; the reasoning for each sits at the line that
@@ -200,26 +328,91 @@ the unit name; the Herdr action runs from anywhere.
   by the row count. Size it up if a real statusline needs more rows; don't delete it, and don't credit
   it with protection it doesn't provide
   ([ADR 0004](./.adr/0004-the-statusline-run-is-bounded.md)). `chrome.test.ts` pins both halves.
+- **The Herdr socket is never dialled across a machine boundary, and no Herdr vocabulary crosses a
+  pack link** — the lead consumes a peer's Collie API, never its Herdr socket
+  ([ADR 0011](./.adr/0011-the-pack-protocol-is-the-mux-driver-seam.md)).
+- **How soon Collie sees an out-of-band change is DECLARED (`topologyLatency`), never measured**, and
+  `refresh()` is on the floor of the port so the phone can ask for a look now
+  ([ADR 0031](./.adr/0031-freshness-is-a-declared-promise.md)). Every mutating route refreshes before
+  it answers; `POST /api/refresh` is a read because it mutates nothing.
 
 ## The journal (scrollback the mirror can't give you)
 
 `bridge/journal/` reads the agent's own session log off disk, per harness (`claude` / `codex` / `pi`,
-registered in `registry.ts`). It is the **only** thing in the bridge that touches the filesystem, so
-the containment rule in [`files.ts`](./bridge/journal/files.ts) is absolute: **every** path an
-adapter is about to read goes through `containedRealpath` — after symlink resolution, on the real
-paths, including paths derived from one already checked. The client never supplies a path. Run
+registered in `registry.ts`). Two other things touch the filesystem, and neither is an exception to
+the rule below: `stt.json` in the state dir when the operator ran `collie stt setup`
+([ADR 0029](./.adr/0029-speech-to-text-is-a-provider-seam-collie-owns.md)), and the operator's own
+font files under `<config-dir>/fonts`, served read-only through `bridge/operator-fonts.ts`
+([ADR 0033](./.adr/0033-the-app-face-is-a-device-preference.md)).
+
+**The law is that the journal is the only place a CLIENT-SUPPLIED value becomes a path** — and even
+there it is a pane id, never a path. `GET /api/fonts/<basename>` does not become a second such place:
+the request's name is **looked up** in the rows the operator's own `theme.toml` declared and that
+row's path is taken, so a name nobody declared is refused before any path exists. The containment
+rule in [`files.ts`](./bridge/journal/files.ts) then runs anyway, on both surfaces and as an
+independent second check: **every** path about to be read goes through `containedRealpath` — after
+symlink resolution, on the real paths, including paths derived from one already checked. Reuse that
+function; don't write a third answer to the sentence in bold. Run
 `bun scripts/journal-probe.ts` against real logs after touching an adapter; unit tests pin the
 grammar, the probe catches on-disk format drift.
 
 ## Security posture (don't regress)
 
 Loopback bind only · exactly one hardened front door — `tailscale serve` (never `funnel`) or a
-conforming reverse proxy per DEPLOYMENT.md Variant C (`COLLIE_SKIP_SERVE=1`) · same-origin gate ·
-optional identity/device gates · strict CSP. A socket call can type into a real terminal — treat the bridge as
-remote shell access.
+conforming reverse proxy per docs/deployment.md Variant C (`COLLIE_SKIP_SERVE=1`) · same-origin gate ·
+optional identity/device gates · strict CSP. A socket call can type into a real terminal — treat a
+collie as remote shell access.
 
-**Collie manages exactly one front door: `tailscale serve`** — `collie-ctl.sh` publishes it, records
-the mapping in `tailscale-managed-handler`, and only ever tears down a mapping matching that record.
-Every other tunnel (NetBird, ZeroTier, Cloudflare Tunnel) is `COLLIE_SKIP_SERVE=1` + DEPLOYMENT.md
+**The loopback gates fail closed, and the pack link is exempt by construction, never by relaxation.**
+Host validation is on by default (`COLLIE_ALLOW_ANY_HOST=1` opts out), `COLLIE_TRUSTED_USER` rejects
+an ABSENT `Tailscale-User-Login` as well as a wrong one (`COLLIE_TRUSTED_USER_OPTIONAL=1`), a
+non-loopback bind refuses to start (`COLLIE_ALLOW_NON_LOOPBACK_BIND=1`), and a non-loopback TCP peer
+is refused. **A collie in a pack is exempt from the bind refusal and `/pack/v1/*` from the peer
+check** — a member is dialled across a machine boundary and that surface carries pinned mutual TLS
+plus the pack secret ([ADR 0013](./.adr/0013-a-peer-listens-without-becoming-a-front-door.md)). The
+exemption is granted by POSITION — the peer check sits after the federated dispatch in
+`bridge/server.ts` — so no pack path is ever spelled there. The standby door is its own listener on
+its own `COLLIE_STANDBY_HOST` and neither gate reaches it; don't route it through the front door's
+`fetch` to share them.
+
+**The bridge makes no outbound call and spawns no long-running child for content — unless the
+operator ran `collie stt setup`.** Speech-to-text (`bridge/stt/`, CLI `cli/stt.ts`) is a registered
+provider seam, absent until that verb writes `stt.json`: it then holds a provider credential at 0600,
+opens an operator-configured outbound path carrying microphone audio, and on the `codex` provider
+spawns a `codex app-server` child. All three costs are declined by doing nothing, the local-engine
+configuration keeps the egress on loopback, and the wire identity is probed honest-first and recorded
+([ADR 0029](./.adr/0029-speech-to-text-is-a-provider-seam-collie-owns.md)). Setup is a CLI act, never
+a web form, for the reason pairing is.
+
+**Two device gates guard writes, independently, and compose by AND.** `COLLIE_DEVICE_HEADER` trusts
+a name a proxy injects; **pairing** (`bridge/pairing.ts`, `collie pair` / `collie devices`) requires a
+bearer credential the device holds, and is on exactly when the registry is non-empty. Reads stay
+ungated by both. Neither applies to `/pack/v1/*`, which has its own two factors. The reasoning sits in
+`bridge/pairing.ts`'s header; don't collapse the two gates into one.
+
+**Collie manages exactly one front door: `tailscale serve`** — the CLI (`cli/serve.ts`) publishes it,
+records the mapping in `tailscale-managed-handler`, and only ever tears down a mapping matching that
+record.
+Every other tunnel (NetBird, ZeroTier, Cloudflare Tunnel) is `COLLIE_SKIP_SERVE=1` + docs/deployment.md
 Variant E: the operator owns the ingress, Collie publishes nothing. **Don't add a second managed front
 door** — [ADR 0001](./.adr/0001-one-managed-front-door.md).
+
+**The pack link (lead↔peer, `/pack/v1/*`) is specified in [`PACK_PROTOCOL.md`](./PACK_PROTOCOL.md)**
+— two factors gate it (pinned mutual TLS + pack secret), and a peer publishes no front door
+([ADR 0013](./.adr/0013-a-peer-listens-without-becoming-a-front-door.md)); the one exception is the
+**deputy's standby door** — bound, never published, armed by silence and spent by the operator's
+pairing credential ([ADR 0027](./.adr/0027-the-deputy-is-named-ahead-of-time.md) ·
+[ADR 0028](./.adr/0028-the-standby-door-is-a-second-listener.md)).
+
+**Touching the pack wire surface forces a protocol decision** — a commit staging one of the
+wire-shape files in `bridge/pack/` must also stage `PACK_PROTOCOL.md` (additive-optional, §7.1) or
+bump `PACK_PROTOCOL_VERSION` (not expressible that way). `scripts/check-pack-wire.sh` is guard C of
+the pre-commit hook; a pure refactor takes the `SKIP_PACK_WIRE_CHECK=1` hatch
+([ADR 0025](./.adr/0025-the-wire-guard-forces-a-decision-never-a-bump.md)).
+
+**Code reaches a peer over the operator's own SSH, never over the pack link** — `pack add` installs
+it and `pack update` levels it, both pushing the lead's own commit as a `git bundle`; the link
+carries runtime data and never becomes a distribution channel
+([ADR 0016](./.adr/0016-updates-ride-the-operators-ssh.md)). How the operator reached a member is
+remembered locally in `pack-ops.json`, which is never a wire field and never merged into the trust
+store.

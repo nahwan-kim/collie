@@ -1,12 +1,15 @@
 import { useEffect, useRef } from "react";
-import { useLoaderData, useLocation, useNavigate, useParams, useRouteLoaderData } from "react-router";
+import { useLoaderData, useLocation, useNavigate, useParams } from "react-router";
 
 import { AgentChat } from "@/components/agent-chat";
 import { useLoadingStalled } from "@/hooks/use-loading-stalled";
-import { ROOT_ROUTE_ID, type HomeData, type PaneData } from "@/lib/loaders";
+import { type PaneData } from "@/lib/loaders";
 import { homePath, panePath } from "@/lib/nav";
+import { paneScopeKey } from "@/lib/scope";
+import { findPane, paneScope } from "@/lib/hosts";
 import { setStatus } from "@/lib/status";
 import type { AgentView } from "@/lib/types";
+import { useRootData } from "@/lib/route-data";
 
 // Pane detail route. Pane output comes from this route's loader; the pane's metadata comes from the
 // shared snapshot (root loader). The pane may be an agent OR a bare shell. A just-created shell
@@ -14,16 +17,22 @@ import type { AgentView } from "@/lib/types";
 // composer stays live immediately while polling catches the snapshot up. Keyed by paneId so
 // switching panes remounts the composer fresh.
 export function DetailRoute() {
+  // SAFETY: this is the `/pane/:paneId` route's element and `paneLoader` returns `PaneData`; the
+  // element does not mount until that loader has resolved. React Router types a data-mode
+  // `useLoaderData()` as `unknown`.
   const pane = useLoaderData() as PaneData;
-  const root = useRouteLoaderData(ROOT_ROUTE_ID) as HomeData;
+  const root = useRootData();
   const { paneId = "" } = useParams();
   // The session this pane belongs to (undefined = primary), read from the pane loader so every
   // navigation and write below stays scoped to it.
-  const session = pane.session;
+  const scope = pane.scope;
   const navigate = useNavigate();
   const location = useLocation();
   const stalled = useLoadingStalled();
 
+  // SAFETY: `location.state` is whatever the navigation that got here attached — `unknown` by
+  // definition. The only shape Collie ever puts there is `{ freshPane }` (components/agent-list's
+  // optimistic open), and the optional chain means any other state reads as "not carried".
   const fresh = (location.state as { freshPane?: AgentView } | null)?.freshPane;
   const inSnapshot =
     root.agents.some((a) => a.paneId === paneId) ||
@@ -41,9 +50,13 @@ export function DetailRoute() {
   if (inSnapshot) seenPaneId.current = paneId;
   const seen = seenPaneId.current === paneId;
 
+  // Looked up WITHIN the scope's host: `w1:p1` exists on every machine in a pack, so a match by id
+  // alone could hand this view another machine's pane — rendering its space, tab and cwd around a
+  // mirror of, and a composer typing into, the one the URL actually addresses. Solo panes carry no
+  // host and match unconditionally, so this is the same lookup it has always been.
   const agent =
-    root.agents.find((a) => a.paneId === paneId) ??
-    root.shellPanes.find((p) => p.paneId === paneId) ??
+    findPane(root.agents, paneId, scope, root.servers, root.sessions) ??
+    findPane(root.shellPanes, paneId, scope, root.servers, root.sessions) ??
     (fresh && fresh.paneId === paneId && !seen ? fresh : undefined);
   const tabLabel = root.tabs.find((t) => t.tabId === agent?.tabId)?.label;
   const gone = !agent;
@@ -53,16 +66,25 @@ export function DetailRoute() {
   // transient poll failure or reconnect doesn't evict a still-valid pane.
   useEffect(() => {
     if (gone && root.bridge === "connected" && !root.error) {
+      // The operator did not close this pane from this phone. It went away under them — from
+      // another device, from the terminal itself, or because the agent exited — and a poll is what
+      // noticed. The status (and the orbit round it turns) is what stops the eviction that follows
+      // being the first thing they see.
       setStatus("Pane closed", "info");
-      navigate(homePath(session), { replace: true });
+      navigate(homePath(scope), { replace: true });
     }
-  }, [gone, root.bridge, root.error, navigate, session]);
+  }, [gone, root.bridge, root.error, navigate, scope]);
 
   return (
     <AgentChat
-      key={paneId}
+      // Keyed by the pane's FULL address, not its id. The key exists to remount the composer on a
+      // pane switch so a draft never follows you into another terminal — and `w1:p1` is a different
+      // terminal in every session and on every machine. Keyed by the id alone, walking from
+      // `w1:p1` on one session to `w1:p1` on another kept the same mounted composer, draft and all.
+      // `paneScopeKey` is the same triple every per-pane cache is keyed by.
+      key={paneScopeKey(scope, paneId)}
       paneId={paneId}
-      session={session}
+      scope={scope}
       agent={agent}
       agents={root.agents}
       shellPanes={root.shellPanes}
@@ -75,8 +97,20 @@ export function DetailRoute() {
       bridge={root.bridge}
       error={root.error}
       stalled={stalled}
-      onBack={() => navigate(homePath(session))}
-      onSelect={(id) => navigate(panePath(id, session))}
+      onBack={() => navigate(homePath(scope))}
+      onSelect={(id) =>
+        navigate(
+          panePath(
+            id,
+            paneScope(
+              scope,
+              findPane([...root.agents, ...root.shellPanes], id, scope, root.servers, root.sessions),
+              root.servers,
+              root.sessions,
+            ),
+          ),
+        )
+      }
     />
   );
 }

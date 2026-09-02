@@ -6,6 +6,8 @@ import { SectionHeader } from "@/components/section-header";
 import { paneParts } from "@/lib/pane-name";
 import { isAttention, sectionHeaderProps, triage } from "@/lib/triage";
 import type { AgentView } from "@/lib/types";
+import { t } from "@/lib/i18n";
+import { useLocale } from "@/hooks/use-locale";
 
 interface ThreadSidebarProps {
   agents: AgentView[];
@@ -32,9 +34,13 @@ interface ThreadSidebarProps {
 // This sheet sees the WHOLE herd, so it has the same problem the dashboard had: the two long tails
 // (Recent, and 30-odd bare shells) bury the handful of agents you actually came to switch to. Both
 // fold, and both remember it, using the dashboard's own header primitive.
+// A module-level empty list, not a `= []` default in the parameter list: a fresh array literal on
+// every render is a new reference, which defeats memoisation downstream for no benefit here.
+const NO_PANES: AgentView[] = [];
+
 export function ThreadSidebar({
   agents,
-  shellPanes = [],
+  shellPanes = NO_PANES,
   currentPaneId,
   onSelect,
   recentOpen = true,
@@ -43,9 +49,12 @@ export function ThreadSidebar({
   onShellsOpenChange,
   className,
 }: ThreadSidebarProps) {
+  useLocale();
   if (agents.length === 0 && shellPanes.length === 0) {
     return (
-      <div className="px-4 py-12 text-center text-sm text-muted-foreground">No agents running.</div>
+      <div className="px-4 py-12 text-center text-sm text-muted-foreground">
+        {t("home.empty.noAgents")}
+      </div>
     );
   }
 
@@ -79,7 +88,7 @@ export function ThreadSidebar({
       {shellPanes.length > 0 && (
         <Section
           id="switch-shells"
-          label="Shells"
+          label={t("home.sidebar.shells")}
           count={shellPanes.length}
           dot="bg-status-unknown"
           {...(onShellsOpenChange ? { open: shellsOpen, onToggle: onShellsOpenChange } : {})}
@@ -158,7 +167,11 @@ function PaneRow({
       onClick={() => onSelect(pane.paneId)}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
+        // The border is in the base string and transparent at rest, so an alarm edge only ever
+        // changes the paint. Added by state it would pull the text 1px in and grow the row 2px,
+        // which is the zig-zag every switcher row above and below it would then sit out of line
+        // with. This is a gap list, not a divide-y one, so a four-sided edge is the right mark.
+        "flex w-full min-w-0 items-center gap-2.5 rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors",
         active ? "bg-accent text-accent-foreground" : "hover:bg-muted/60 active:bg-muted",
         // The switcher is exactly where you jump TO the thing that needs you, so it must be able to
         // SHOW that — it renders every pane identically otherwise. Staying denser than the dashboard
@@ -168,7 +181,7 @@ function PaneRow({
         // The border is applied even to the ACTIVE row, so the two cues compose: the pane you're in
         // AND blocked keeps both its accent fill and its alarm edge. Only the fill is withheld,
         // because two backgrounds can't both win.
-        isAttention(pane.status) && "border border-status-blocked/40",
+        isAttention(pane.status) && "border-status-blocked/40",
         !active && isAttention(pane.status) && "bg-status-blocked/5",
       )}
     >

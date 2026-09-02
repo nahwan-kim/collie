@@ -3,6 +3,8 @@ import { ChevronLeft, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { t } from "@/lib/i18n";
+import { useLocale } from "@/hooks/use-locale";
 
 // Shared building blocks for the long-press action sheets — pane AND tab — so the two stay visually
 // and behaviourally identical (the user's ask: "they should be the same"). The plain action row, the
@@ -25,7 +27,11 @@ export function ActionRow({
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors hover:bg-accent active:bg-muted"
+      // `min-h-11` — a REAL 44px hit box, stated (DESIGN.md §6). `px-3 py-2.5` around a 20px
+      // `text-sm` line drew 40px, five under the floor, on rows a thumb reaches for in a sheet that
+      // has just slid up under it. A floor rather than a fixed height, so a row whose label wraps on
+      // a narrow phone still grows instead of clipping.
+      className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors hover:bg-accent active:bg-muted"
     >
       {icon}
       {label}
@@ -62,7 +68,9 @@ export function DestructiveActionRow({
       onClick={onClick}
       disabled={closing}
       className={cn(
-        "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors disabled:opacity-60",
+        // Same 44px floor as ActionRow above — and it matters more here, because this is the row a
+        // mis-tap arms.
+        "flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors disabled:opacity-60",
         armed
           ? "bg-destructive text-destructive-foreground"
           : "text-destructive hover:bg-destructive/10 active:bg-destructive/15",
@@ -99,6 +107,7 @@ export function RenameView({
   canSave: boolean;
   placeholder: string;
 }) {
+  useLocale();
   function onInputKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -114,21 +123,21 @@ export function RenameView({
         className="flex items-center gap-1 self-start rounded-md py-1 pr-2 text-xs font-medium text-muted-foreground transition-colors active:bg-muted"
       >
         <ChevronLeft className="size-3.5" />
-        Back
+        {t("actionSheet.back")}
       </button>
       <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-muted-foreground">Label</span>
+        <span className="text-xs font-medium text-muted-foreground">{t("actionSheet.label")}</span>
         <input
           ref={inputRef}
           value={label}
           onChange={(e) => onLabelChange(e.target.value)}
           onKeyDown={onInputKeyDown}
           placeholder={placeholder}
-          className="h-11 rounded-lg border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-11 rounded-lg border border-border bg-background px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         />
       </label>
       <Button onClick={onSave} disabled={saving || !canSave} className="h-11">
-        {saving ? <Loader2 className="size-4 animate-spin" /> : "Save"}
+        {saving ? <Loader2 className="size-4 animate-spin" /> : t("actionSheet.save")}
       </Button>
     </div>
   );

@@ -1,35 +1,55 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Bell, Loader2 } from "lucide-react";
-import { useNavigate, useRouteLoaderData } from "react-router";
+import { useLoaderData, useNavigate } from "react-router";
 
+import { RouteHeader } from "@/components/app-header";
 import { Button } from "@/components/ui/button";
 import { BuildStamp } from "@/components/build-stamp";
 import { UpdateBanner } from "@/components/update-banner";
 import { ConnectionInfo } from "@/components/connection-info";
 import { Card } from "@/components/ui/card";
 import { NotifyPrefsControl } from "@/components/notify-prefs-control";
+import { PairedDevices } from "@/components/paired-devices";
+import { PackSettingsCard } from "@/components/pack-settings-card";
 import { SnoozeControl } from "@/components/snooze-control";
 import { ThemeControl } from "@/components/theme-control";
 import { HapticsControl } from "@/components/haptics-control";
+import { HandsFreeControl } from "@/components/hands-free-control";
+import { ZenControl } from "@/components/zen-control";
+import { InstallControl } from "@/components/install-control";
+import { LanguageControl } from "@/components/language-control";
+import { FontSettingsControl } from "@/components/font-settings";
+import { TypefaceControl } from "@/components/typeface-control";
 import { UpdateCheckControl } from "@/components/update-check-control";
 import { Switch } from "@/components/ui/switch";
 import { fetchConfig } from "@/lib/api";
 import { usePushControl } from "@/hooks/use-push";
-import { ROOT_ROUTE_ID, type HomeData } from "@/lib/loaders";
+import { useLocale } from "@/hooks/use-locale";
+import { t } from "@/lib/i18n";
+import { type DevicesData } from "@/lib/loaders";
 import { homePath } from "@/lib/nav";
-import { useSession } from "@/lib/session";
+import { useScope } from "@/lib/session";
 import type { PushAvailability } from "@/lib/push";
+import { useOptionalRootData } from "@/lib/route-data";
+
+const EMPTY_DEVICES: DevicesData = { enforced: false, current: null, devices: [], error: false };
 
 // Settings page — currently just the push-notification toggle. Reachable from the home header gear.
 // Lives under the root route, so the snapshot polling/push-setup in RootLayout keeps running behind it.
 export function SettingsRoute() {
   const navigate = useNavigate();
-  const session = useSession();
+  const scope = useScope();
+  useLocale();
   const { state, busy, setEnabled } = usePushControl();
   const [error, setError] = useState<string | null>(null);
 
-  // Settings lives under the root route, so the live snapshot (bridge + device auth) is right here.
-  const root = useRouteLoaderData(ROOT_ROUTE_ID) as HomeData | undefined;
+  const root = useOptionalRootData();
+  // This route's OWN loader: the paired-device registry (lib/loaders.ts devicesLoader).
+  // Defaulted rather than asserted: a harness that mounts this route without the loader (or a
+  // navigation whose loader threw) must still render the rest of Settings, not crash the page.
+  // SAFETY: `devicesLoader` returns `DevicesData` for this route; `undefined` is the case the
+  // default below exists for. React Router types a data-mode `useLoaderData()` as `unknown`.
+  const devices = (useLoaderData() as DevicesData | undefined) ?? EMPTY_DEVICES;
   // The build the bridge reports it's serving — handy in the diagnostics panel alongside the local
   // stamp in the footer. Best-effort: stays undefined if the bridge is unreachable.
   const [serverBuild, setServerBuild] = useState<string | undefined>();
@@ -57,38 +77,91 @@ export function SettingsRoute() {
 
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-screen-sm flex-1 flex-col">
-      <header className="sticky top-0 z-20 flex items-center gap-2 border-b border-border/60 bg-background/85 px-2 py-2 backdrop-blur-md [padding-top:calc(env(safe-area-inset-top)_+_0.5rem)]">
-        <Button
-          variant="ghost"
-          size="icon"
-          // size="icon" is 36px; the header's other controls are 44px since the tap-target pass.
-          className="size-11"
-          onClick={() => navigate(homePath(session))}
-          aria-label="Back"
-        >
-          <ArrowLeft className="size-5" />
-        </Button>
-        <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
-      </header>
+      {/* One header treatment app-wide — and now that is a FACT, not a claim: this route does not
+          mount a header at all, it fills the one that is already there (RootLayout's
+          <AppHeaderHost/>). It used to be a hand-rolled `<header>` that only
+          copied the shell's colours, and it drifted the two ways a copy always does. It carried no
+          <AlphaBar/>, so walking into Settings off a prerelease build silently dropped the "you are
+          on a beta" strip; and its padding recipe was its own, so it could not track the shell's.
+          The row's CONTENT is this route's own — a back button where the mark stands, and the page
+          title — which is exactly what `override` is for (the pane's find bar is the other user).
+          The back button is `size-11` sitting at the row's `pl-4`, so its icon centre lands on the
+          same 38px as the Collie mark it stands in for: nothing shifts sideways either. */}
+      <RouteHeader
+        width="column"
+        override={
+          <>
+            <Button
+              variant="ghost"
+              size="icon"
+              // 44px — the tap floor every control in this row shares. size="icon" alone is 36px.
+              className="size-11"
+              onClick={() => navigate(homePath(scope))}
+              aria-label={t("settings.nav.back")}
+            >
+              <ArrowLeft className="size-5" />
+            </Button>
+            <h1 className="min-w-0 truncate text-lg font-semibold tracking-tight">{t("settings.title")}</h1>
+          </>
+        }
+      />
 
-      <main className="flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4">
-        {/* First: it's the setting people come here to change, and below the notification stack it
-            sat off-screen on a phone, a scroll into a 1240px page. */}
+      {/* `relative` for the same reason the home scroller carries it: an `sr-only` (position: absolute)
+          deep in this page would otherwise escape the scroller and grow the document's own
+          scrollbar. */}
+      <main className="relative flex min-h-0 flex-1 flex-col space-y-4 overflow-y-auto p-4">
+        {/* Above even Theme, because it is not a setting: it is a one-shot offer the browser makes
+            and then stops making. Renders NOTHING unless that offer is actually on the table
+            (lib/install.ts), so on most visits this line costs the page no height at all — and when
+            the card does exist, burying a one-time action under the standing preferences would be
+            the one way to guarantee it is never seen. */}
+        <InstallControl />
+
+        {/* First of the SETTINGS: it's the one people come here to change, and below the
+            notification stack it sat off-screen on a phone, a scroll into a 1240px page. */}
         <ThemeControl />
+
+        {/* Language sits right beside appearance — both are "how this phone presents itself" — and
+            ahead of device behaviour, which is more of a per-device tweak than a standing choice. */}
+        <LanguageControl />
+
+        {/* TWO FONT CARDS, ADJACENT, AND NO HEADING OVER THEM. They sit with appearance, immediately
+            under Language: all four are "how this phone presents itself".
+
+            The pair is deliberately not a labelled "Design" section. Settings is a flat stack of
+            cards and has no headings at all; introducing the first one here would imply four more
+            and would push a set-once preference down the page behind furniture. Adjacency does the
+            grouping instead — and it does the other job too, which is answering the only question
+            either card raises. "Typeface" is the APP's own face (ADR 0033, a per-device setting
+            since round 5); "Terminal font" is the mirror's. Reading them one after the other is
+            what makes the split obvious. Keep them together and keep them in this order: the app's
+            own voice first, the thing it renders second. */}
+        <TypefaceControl />
+        <FontSettingsControl />
 
         {/* Device behaviour sits with appearance — both are "how this phone treats you", as opposed
             to the herd/notification settings below. Renders nothing where vibrate is unsupported. */}
         <HapticsControl />
+
+        {/* Voice, when this collie has any: also "how this phone treats you", and it belongs beside
+            haptics rather than with the herd settings below. Renders nothing where no provider is
+            configured or the browser cannot record. */}
+        <HandsFreeControl />
+
+        {/* AVAILABILITY ONLY. This row does not turn zen on — it decides whether the pane's actions
+            sheet offers the "Zen mode" row at all. It sits with haptics and voice because it is the
+            same kind of thing: a persisted, per-device decision about how this phone treats you,
+            not a rendering pref (those live in the pane's own Display dock). Off by default, because
+            zen takes away every way back except one floating button. */}
+        <ZenControl />
 
         <Card className="gap-0 py-0">
           <div className="flex items-center justify-between gap-4 p-4">
             <div className="flex min-w-0 items-start gap-3">
               <Bell className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
               <div className="min-w-0">
-                <div className="font-medium">Push notifications</div>
-                <p className="text-sm text-muted-foreground">
-                  Get a notification when an agent needs you.
-                </p>
+                <div className="font-medium">{t("settings.push.title")}</div>
+                <p className="text-sm text-muted-foreground">{t("settings.push.description")}</p>
               </div>
             </div>
             {/* Fixed slot the size of the Switch (h-6 w-11): the spinner is smaller, so without it
@@ -99,7 +172,7 @@ export function SettingsRoute() {
                   checked={on}
                   disabled={toggleDisabled}
                   onCheckedChange={toggle}
-                  aria-label="Push notifications"
+                  aria-label={t("settings.push.title")}
                 />
               ) : (
                 <Loader2 className="size-4 animate-spin text-muted-foreground" />
@@ -108,12 +181,12 @@ export function SettingsRoute() {
           </div>
 
           {state && blocked && (
-            <p className="border-t border-border/60 px-4 py-2.5 text-xs text-muted-foreground">
+            <p className="border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
               {availabilityNote(state.availability)}
             </p>
           )}
           {error && (
-            <p className="border-t border-border/60 px-4 py-2.5 text-xs text-status-blocked">
+            <p className="border-t border-border px-4 py-2.5 text-xs text-status-blocked">
               {error}
             </p>
           )}
@@ -134,6 +207,16 @@ export function SettingsRoute() {
         {/* On-demand upstream update check (independent of push) — drives the footer UpdateBanner. */}
         <UpdateCheckControl />
 
+        {/* Access sits with the connection diagnostics — both answer "what is this device allowed
+            to do, and why". Pairing is the gate you can change from here; ConnectionInfo below only
+            reports the header-based one. */}
+        <PairedDevices data={devices} />
+
+        {/* The pack census, immediately above the connection diagnostics: both answer "what is this
+            thing talking to, and is it well". Renders NOTHING on a solo install — the card owns that
+            gate itself (usePack().multi), so this page needs no pack-shaped conditional. */}
+        <PackSettingsCard />
+
         <ConnectionInfo bridge={root?.bridge} device={root?.device} build={serverBuild} />
 
         {/* Update nudge + build stamp, grouped and pinned to the bottom of the page. */}
@@ -149,28 +232,28 @@ export function SettingsRoute() {
 function reasonText(reason: PushAvailability | undefined): string {
   switch (reason) {
     case "insecure":
-      return "Push needs an HTTPS connection.";
+      return t("settings.push.reason.insecure");
     case "server-off":
-      return "Push isn't configured on the bridge (no VAPID keys).";
+      return t("settings.push.reason.serverOff");
     case "denied":
-      return "Notifications are blocked — enable them in your browser settings.";
+      return t("settings.push.reason.denied");
     case "unsupported":
-      return "This browser doesn't support push notifications.";
+      return t("settings.push.reason.unsupported");
     default:
-      return "Couldn't enable push notifications.";
+      return t("settings.push.reason.default");
   }
 }
 
 function availabilityNote(a: PushAvailability): string {
   switch (a) {
     case "insecure":
-      return "Unavailable over plain HTTP — serve Collie over HTTPS to enable push.";
+      return t("settings.push.availability.insecure");
     case "server-off":
-      return "The bridge has no VAPID keys configured, so push is disabled server-side.";
+      return t("settings.push.availability.serverOff");
     case "denied":
-      return "Notifications are blocked for this site. Re-enable them in your browser settings.";
+      return t("settings.push.availability.denied");
     case "unsupported":
-      return "This browser doesn't support push notifications.";
+      return t("settings.push.availability.unsupported");
     case "ready":
       return "";
   }

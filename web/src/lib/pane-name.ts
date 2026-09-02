@@ -28,7 +28,8 @@ export interface PaneParts {
   project: string;
   /** The tab label, or null when it says nothing (see meaningfulTabLabel, bridge-side). */
   tab: string | null;
-  /** The pane's own name if it has one, else a shortened cwd. Null when there's neither. */
+  /** The pane's own name if it has one, else a shortened cwd, else a stale terminal title. Null when
+   *  there is none of the three. Always rendered in the row's muted style. */
   secondary: string | null;
 }
 
@@ -50,6 +51,42 @@ function informativeCwd(cwd: string, project: string): string | null {
   return shortCwd(cwd);
 }
 
+/**
+ * The same idea as {@link informativeCwd}, gated against the NAME THAT IS ACTUALLY RENDERED rather
+ * than against the project.
+ *
+ * `informativeCwd` is a herd-list rule and it stays one: there, line 1 IS the project, so comparing
+ * the directory's own name to the project is comparing the path to the line above it. The pane
+ * header's line 1 is not the project — it is `paneLabel ?? sessionName ?? "space › tab"`, so a
+ * hand-set name ("logs", "pack overview") never puts the project on screen and the project-gate
+ * would suppress the path that is the only thing left naming the work. Measured over the fixture
+ * herd, the project gate hid the path on 14 panes of 14.
+ *
+ * So the question this asks is the one the reader asks: does the path show me a SEGMENT the name
+ * above it does not already show? `…/workspace-sprqvntrs/openplate` under
+ * `workspace-sprqvntrs › openplate` says nothing and is dropped; `…/openplate/worktrees/fix-42`
+ * carries `worktrees` and `fix-42` and is kept; `~/src/sprqvntrs-api` under `logs` is kept, because
+ * `logs` names no directory at all.
+ *
+ * Segments are compared case-insensitively against the name's own word run, split on everything a
+ * path segment cannot contain — so the `›` of a breadcrumb separates two tokens rather than
+ * becoming part of one. `~` and the `…` elision marker are not segments and never count.
+ */
+export function cwdBeyondName(cwd: string, name: string): string | null {
+  if (!cwd) return null;
+  const short = shortCwd(cwd);
+  const shown = new Set(
+    name
+      .toLowerCase()
+      .split(/[^a-z0-9._-]+/)
+      .filter(Boolean),
+  );
+  const segments = short.split("/").filter((s) => s !== "" && s !== "~" && s !== "…");
+  if (segments.length === 0) return null;
+  if (segments.every((s) => shown.has(s.toLowerCase()))) return null;
+  return short;
+}
+
 /** The parts of a herd-list row title, unjoined — see {@link PaneParts}. */
 export function paneParts(pane: AgentView): PaneParts {
   const project = pane.workspaceLabel || pane.workspaceId;
@@ -57,11 +94,18 @@ export function paneParts(pane: AgentView): PaneParts {
   // because it is the only one of the three that tracks the work as it moves — and in the herd this
   // exists to untangle (several agents in ONE project) the cwd is identical on every row, so it
   // discriminates nothing.
-  const own = pane.paneLabel || pane.sessionName || pane.terminalTitle;
+  //
+  // Unless the title is STALE: the program that wrote it has exited, so it is not what this pane is
+  // doing — it is what something here once did. It drops BELOW the cwd rather than out of the row,
+  // because it is still the only trace of what ran, and the row's muted line is where a fact you
+  // read second belongs.
+  const stale = pane.terminalTitle !== undefined && pane.terminalTitleStale === true;
+  const own = pane.paneLabel || pane.sessionName || (stale ? "" : pane.terminalTitle);
+  const secondary = own || informativeCwd(pane.cwd, project) || (stale ? pane.terminalTitle : null);
   return {
     project,
     tab: pane.tabLabel ?? null,
-    secondary: own || informativeCwd(pane.cwd, project),
+    secondary: secondary ?? null,
   };
 }
 

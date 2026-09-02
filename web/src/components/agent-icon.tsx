@@ -6,7 +6,7 @@ import { AGENT_BRANDS } from "@/components/agent-icon-data";
 // "claude-code" / "opencode-dev". Mirrors the matching in lib/agent-commands.ts.
 function brandKey(agent: string): string | undefined {
   const k = agent.toLowerCase().trim();
-  if (AGENT_BRANDS[k]) return k;
+  if (AGENT_BRANDS.has(k)) return k;
   if (k.startsWith("claude")) return "claude";
   if (k.startsWith("codex")) return "codex";
   if (k.startsWith("opencode")) return "opencode";
@@ -28,13 +28,13 @@ export function AgentIcon({
   agent: string | null | undefined;
   className?: string;
 }) {
-  const brand = agent ? AGENT_BRANDS[brandKey(agent) ?? ""] : undefined;
+  const brand = agent ? AGENT_BRANDS.get(brandKey(agent) ?? "") : undefined;
 
   if (!brand) {
     return (
       <span
         className={cn(
-          "inline-flex shrink-0 items-center justify-center rounded-[22%] border bg-muted text-[0.5em] font-semibold uppercase leading-none text-muted-foreground",
+          "inline-flex shrink-0 items-center justify-center rounded-md border bg-muted text-[0.5em] font-semibold uppercase leading-none text-muted-foreground",
           className,
         )}
         role="img"

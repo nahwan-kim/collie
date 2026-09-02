@@ -3,11 +3,19 @@ import type { ReactNode } from "react";
 
 import type { WizardStepChip } from "@/lib/blocks";
 import { cn } from "@/lib/utils";
+import { t } from "@/lib/i18n";
+import { useLocale } from "@/hooks/use-locale";
 
 // The chip pill, identical for a question and for the trailing Submit — the only difference is which
 // one is current, which the callers know and this component does not infer.
-const CHIP_CLASS = "flex min-w-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] leading-tight";
-const CHIP_CURRENT = "border-primary/60 bg-primary/15 font-medium text-foreground";
+// `font-medium` is in the SHARED string, not on the current chip: a weight change is a width
+// change, so a chip putting it on when it becomes current would grow and shove every chip after it
+// along the strip. The final weight is shipped at rest and the state is carried by colour alone —
+// the border, the tint and the text token below. Reserving the wider metric this way costs nothing;
+// the idle chip is already held back far enough by `text-muted-foreground` on a bare border.
+const CHIP_CLASS =
+  "flex min-w-0 items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium leading-tight";
+const CHIP_CURRENT = "border-primary/60 bg-primary/15 text-foreground";
 const CHIP_IDLE = "border-border/60 text-muted-foreground";
 // 28px keeps the strip slim; the hit area is bled into the gap around it so the target is 44px
 // without the visual weight — the same trick the mirror's tap-to-open links use.
@@ -46,6 +54,7 @@ export function WizardStepper({
   onBack: () => void;
   onNext: () => void;
 }) {
+  useLocale();
   // The first question has nothing to its left; the TUI clamps there anyway, but a disabled control
   // says so rather than sending a key that does nothing.
   const atFirstQuestion = !submitCurrent && (steps[0]?.current ?? false);
@@ -54,25 +63,27 @@ export function WizardStepper({
   // advance button's name changing — neither of which is reliably announced. Say it out loud, once,
   // on change. Politely: it is context, not an interruption.
   const position = submitCurrent
-    ? `Step ${steps.length + 1} of ${steps.length + 1}, Submit`
+    ? t("dialog.stepPosition.submit", { index: steps.length + 1, total: steps.length + 1 })
     : currentIndex >= 0
-      ? `Step ${currentIndex + 1} of ${steps.length + 1}, ${steps[currentIndex]!.label}`
+      ? t("dialog.stepPosition.step", {
+          index: currentIndex + 1,
+          total: steps.length + 1,
+          label: steps[currentIndex]!.label,
+        })
       : "";
   return (
     <div className="flex items-center gap-1.5">
-      <span className="sr-only" role="status">
-        {position}
-      </span>
+      <output className="sr-only">{position}</output>
       <button
         type="button"
-        aria-label="Previous step"
+        aria-label={t("dialog.previousStepAria")}
         disabled={locked || atFirstQuestion}
         onClick={onBack}
         className={CHEVRON_CLASS}
       >
         {busyBack ? busyIcon : <ChevronLeft className="size-4" />}
       </button>
-      <ol aria-label="Questions" className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+      <ol aria-label={t("dialog.questionsAria")} className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
         {steps.map((step, i) => (
           <li
             key={i}
@@ -80,9 +91,9 @@ export function WizardStepper({
             className={cn(CHIP_CLASS, step.current ? CHIP_CURRENT : CHIP_IDLE)}
           >
             {step.answered ? (
-              <Check className="size-3 shrink-0 text-primary" aria-label="Answered" />
+              <Check className="size-3 shrink-0 text-primary" aria-label={t("dialog.answeredAria")} />
             ) : null}
-            <span className="truncate">{step.label}</span>
+            <span className="font-content truncate">{step.label}</span>
           </li>
         ))}
         {/* The trailing Submit pill is the dialog's last stop, and on the wizard's review step it is
@@ -91,12 +102,12 @@ export function WizardStepper({
           aria-current={submitCurrent ? "step" : undefined}
           className={cn(CHIP_CLASS, submitCurrent ? CHIP_CURRENT : CHIP_IDLE)}
         >
-          <span>Submit</span>
+          <span>{t("dialog.submitChip")}</span>
         </li>
       </ol>
       <button
         type="button"
-        aria-label="Next step"
+        aria-label={t("dialog.nextStepAria")}
         disabled={locked || nextDisabled}
         onClick={onNext}
         className={CHEVRON_CLASS}
