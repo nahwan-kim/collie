@@ -390,6 +390,84 @@ export interface UpdateInfo {
   bridgeStale: boolean;
   /** When the upstream check last ran (epoch ms), or null if it hasn't. */
   checkedAt: number | null;
+  /** Every release newer than `current`, oldest first — what one update folds in. Absent on an
+   *  older bridge, which the card reads as "nothing to list". */
+  newerVersions?: string[];
+  /** The detached updater's run record. Absent when this install has never run one. */
+  run?: UpdateRun;
+}
+
+/**
+ * Where an update run is (mirrors `bridge/update-run.ts`). `done`, `rolled-back`, `stuck` and
+ * `interrupted` are terminal; the four in the middle are somebody still driving it.
+ *
+ * `restarting` and `verifying` are the states the operator stares at, and the card renders them as
+ * PROGRESS. The bridge is gone during `restarting` — that is the update working, not an outage.
+ */
+export type UpdateRunState =
+  | "idle"
+  | "preflight"
+  | "staging"
+  | "restarting"
+  | "verifying"
+  | "done"
+  | "rolled-back"
+  | "stuck"
+  | "interrupted";
+
+/** The run record the bridge and the standby door both report (mirrors `bridge/update-run.ts`). */
+export interface UpdateRun {
+  schema: number;
+  state: UpdateRunState;
+  /** The version this run started from, or null when there was none to name. */
+  from: string | null;
+  /** The version it is going to. */
+  to: string | null;
+  startedAt: number;
+  updatedAt: number;
+  pid: number;
+  attempt: number;
+  /** Why it is where it is, when that needs a sentence. */
+  reason?: string;
+  /** A bounded, credential-scrubbed tail of the service log, recorded on a failure. */
+  logTail?: string;
+  /** The command the operator runs by hand — carried only by `stuck`. */
+  recovery?: string;
+}
+
+/** One preflight check (mirrors `cli/update-check.ts`). `id` is stable; the prose is not. */
+export interface PreflightCheck {
+  id: string;
+  verdict: "green" | "amber" | "red";
+  reason: string;
+  /** The one command that clears it, where one exists. */
+  remedy?: string;
+}
+
+/** The preflight report: the worst verdict, and every check behind it. */
+export interface PreflightReport {
+  schema: number;
+  verdict: "green" | "amber" | "red";
+  checks: PreflightCheck[];
+}
+
+/**
+ * `GET /api/update/check` — the update snapshot plus the preflight the button is gated on.
+ *
+ * `preflight: null` is a fact, not an omission: it means the check could not be run here, which
+ * REFUSES an update rather than allowing one.
+ */
+export interface UpdateCheckResponse extends UpdateInfo {
+  preflight: PreflightReport | null;
+}
+
+/** `POST /api/update` — the 202. The run itself is followed on the snapshot from here. */
+export interface UpdateStartResponse {
+  ok: true;
+  /** The version the bridge is installing. */
+  to: string;
+  major: boolean;
+  run: UpdateRun | null;
 }
 
 /**
@@ -698,53 +776,34 @@ export interface OperatorFontRow {
 }
 
 /**
- * One operator-declared palette row (a `[[commands]]` table in their `commands.toml`). Mirrors
- * OperatorCommand in
- * bridge/types.ts. Resolved against the shipped catalog by `commandsFor()`, which hands a pane
- * these rows instead of the catalog when any of them address it — see agent-commands.ts for why a
- * plugin- or user-registered command can only arrive this way.
+ * One operator-declared launcher row (`launchers.toml`). Mirrors Launcher in
+ * bridge/types.ts. A tap creates a throwaway Space and types this shell line verbatim
+ * into its fresh shell — herdr deletes a Space when its last pane closes, so quit → gone
+ * with nothing to clean up. The label is what the dashboard button shows; when the
+ * operator omits it the bridge defaults it to the command's first token.
  */
-export interface OperatorCommand {
-  /** Herdr agent name this applies to, lowercased. Omitted = every agent. */
-  agent?: string;
+export interface Launcher {
+  /** The shell line typed into the new Space's shell, verbatim. Also the allowlist key /api/launch matches. */
   command: string;
-  description: string;
-  takesArg: boolean;
-  argHint: string;
-  /** The operator marking their own row dangerous. Optional so an older bridge stays readable. */
-  confirm?: boolean;
-}
-
-/**
- * One operator-declared Keys-tray preset (a `[[keys]]` table in their `keys.toml`). Mirrors
- * OperatorKeyRow in bridge/types.ts. Resolved against the shipped presets by `ctrlPresetsFor()`,
- * which hands a pane these rows instead of the shipped ones when any of them address it. Only the
- * tray's preset CATALOG is configurable — its keyboard is fixed.
- */
-export interface OperatorKeyRow {
-  /** Herdr agent name this applies to, lowercased. Omitted = every agent. */
-  agent?: string;
-  /** The button's text, and its identity within one scope. */
+  /** Button label. Defaults to the command's first whitespace-separated token. */
   label: string;
-  /** Chords in Herdr's `pane.send_keys` spelling; more than one is sent as ONE ordered batch. */
-  keys: string[];
-  /** The operator putting their own row behind the tray's two-tap confirm. */
-  danger?: boolean;
+  /**
+   * Absolute directory the new Space (or tab) opens in. Absent means "here": from the dashboard,
+   * the bridge's home dir; from a pane, that pane's own cwd. Present, it is pinned and shown
+   * shortened under home (`shortenHome`) wherever the row's folder is displayed.
+   */
+  cwd?: string;
 }
 
 /**
- * One operator-declared Quick-dock group (a `[[replies]]` table in their `quick-replies.toml`).
- * Mirrors OperatorQuickReplyRow in bridge/types.ts. Resolved against the shipped groups by
- * `quickRepliesFor()`, which hands a pane these rows instead of the shipped ones when any of them
- * address it.
+ * GET /api/launchers — the rows for ONE host (a pack has one file per member), read live off its
+ * `launchers.toml`. `home` is that host's own home dir, for shortening a pinned `cwd` without the
+ * client knowing which machine answered (a peer's home is not this browser's, and is not even
+ * necessarily the same string as the lead's).
  */
-export interface OperatorQuickReplyRow {
-  /** Herdr agent name this applies to, lowercased. Omitted = every agent. */
-  agent?: string;
-  /** The group's heading, and its identity within one scope. */
-  title: string;
-  /** The literal strings sent — each is typed into the pane and submitted verbatim. */
-  items: string[];
+export interface LaunchersResponse {
+  launchers: Launcher[];
+  home: string;
 }
 
 export interface BridgeConfig {

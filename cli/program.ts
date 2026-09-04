@@ -76,6 +76,7 @@ import {
 } from "./stt.ts";
 import { realExec, realFiles } from "./sys.ts";
 import { cmdApplyUpdate, cmdUpdate } from "./update.ts";
+import { cmdUpdateCheck, updateCheckDeps, wantsCheck } from "./update-check.ts";
 
 // The `collie` binary's dispatch: argv in, exit code out. This module owns ONLY the dispatch —
 // every verb's behaviour lives in its own module under `cli/`, taking the resolved context as an
@@ -291,14 +292,19 @@ export const COMMANDS: readonly Command[] = [
   {
     name: "update",
     summary:
-      "advance to the newest release of this major (--major crosses one; --rollback returns a binary install to its previous version)",
-    run: (args, s) => cmdUpdate(updateDeps(s.io), args),
+      "advance to the newest release of this major (--check is a read-only preflight, and --check --local checks this instance only, skipping pack members; --major crosses one; --rollback flips current back to the previous version; --status shows the run)",
+    // `--check` is a different verb wearing `update`'s name: a read-only preflight that answers
+    // "could this update succeed right now?" and touches nothing (`cli/update-check.ts`). It is
+    // routed HERE, before `cmdUpdate` is ever constructed, so no part of the real update path can
+    // run behind it.
+    run: (args, s) =>
+      wantsCheck(args) ? cmdUpdateCheck(updateCheckDeps(s.io), args) : cmdUpdate(updateDeps(s.io), args),
   },
   {
     name: "_apply-update",
     summary: "internal: the second half of `update`, run post-pull",
     internal: true,
-    run: (_args, s) => cmdApplyUpdate(updateDeps(s.io)),
+    run: (args, s) => cmdApplyUpdate(updateDeps(s.io), args),
   },
   lifecycleCommand(
     "_exec-bridge",

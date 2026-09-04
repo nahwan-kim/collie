@@ -10,22 +10,26 @@ import {
   ScrollText,
   TerminalSquare,
 } from "lucide-react";
-import { useSwipeUp } from "@/hooks/use-swipe";
 import { useKeyboardOpen } from "@/hooks/use-keyboard";
+import { useSheetPull } from "@/hooks/use-sheet-pull";
 import { useSpaceActions } from "@/hooks/use-spaces";
 import { useDashPrefs, openForCount } from "@/hooks/use-dash-prefs";
+import { useLaunchers } from "@/lib/launchers";
+import { buzz } from "@/lib/haptics";
 import { mirrorFont, useDisplayPrefs } from "@/hooks/use-display-prefs";
 import { useStableTerminalDraft } from "@/hooks/use-terminal-draft";
 import { useLocale } from "@/hooks/use-locale";
 import { isConnecting } from "@/lib/connection";
 import { t, type MessageKey } from "@/lib/i18n";
 import { setStatus } from "@/lib/status";
+import { setFollowing as publishFollowing, stampSend } from "@/lib/poll-intent";
 import { useZenEnabled } from "@/lib/zen";
 import { setStripsCollapsed, useStripsCollapsed } from "@/lib/strips-collapsed";
 import { ChatMessageList, type ChatMessageListHandle } from "@/components/ui/chat/chat-message-list";
 import { BottomSheet } from "@/components/ui/sheet";
 import { Collapse, CollapseSwap } from "@/components/ui/collapse";
 import { RouteHeader } from "@/components/app-header";
+import { HeaderStatus } from "@/components/header-status";
 import { AnsiOutput } from "@/components/ansi-output";
 import { MIRROR_SPACE, MIRROR_INVERT, styleFor } from "@/components/mirror-space";
 import { cn } from "@/lib/utils";
@@ -120,6 +124,38 @@ function foldLabelKey(tabCount: number, paneCount: number): MessageKey {
 // sheets are separate and live inside <Composer>.)
 type Drawer = "switcher" | "paneMenu" | null;
 
+/**
+ * Is the caret in the MESSAGE COMPOSER's field, as opposed to any other input on the screen?
+ *
+ * Read by the strips' auto-fold, which may only spend the band when the keyboard on screen is the
+ * composer's — see the gate for the failure that taught us the difference (the actions sheets'
+ * rename field lives inside the band that folds).
+ *
+ * Delegated to the document rather than wired through `<Composer>`: the field is `ChatInput`, four
+ * layers down and behind an imperative handle, and threading an `onFocus` up through all of it to
+ * answer one question is more seam than the question is worth. `focusout` is read off
+ * `relatedTarget` — the node about to take focus — because `document.activeElement` is `<body>` at
+ * that moment, which would flip this false for one frame on every hop within the composer and start
+ * the fold animating on a focus change that never left.
+ */
+function useComposerFocus(): boolean {
+  const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    const inComposer = (node: EventTarget | null) =>
+      node instanceof Element && node.closest('[data-slot="chat-input"]') !== null;
+    const onIn = (e: FocusEvent) => setFocused(inComposer(e.target));
+    const onOut = (e: FocusEvent) => setFocused(inComposer(e.relatedTarget));
+    setFocused(inComposer(document.activeElement));
+    document.addEventListener("focusin", onIn);
+    document.addEventListener("focusout", onOut);
+    return () => {
+      document.removeEventListener("focusin", onIn);
+      document.removeEventListener("focusout", onOut);
+    };
+  }, []);
+  return focused;
+}
+
 // The detail view mirrors a terminal pane, NOT a chat thread. The pane's output comes from the
 // route loader (`text`); polling revalidates it. Replies/keys are confirmed via the header status
 // line (`setStatus`), then a revalidation pulls the fresh output.
@@ -156,7 +192,8 @@ export function AgentChat({
   // current while we're reconnecting/lost, and restores instantly on recovery. Both marks dim
   // together — dimming only one of them would leave a frozen reading looking half live.
   const connecting = isConnecting({ bridge, error, stalled });
-  const { newTab } = useSpaceActions();
+  const { newTab, launch, launching, creatingTab } = useSpaceActions();
+  const { launchers, home: launchersHome } = useLaunchers(scope);
   // Single display-prefs instance: the View controls (in <Composer>) write it, the mirror reads it.
   const { prefs, setWrap, stepFontSize, setRawTerminal, setTapToFocus } = useDisplayPrefs();
   // The chosen terminal font (Settings → Terminal font), applied by re-pointing `--font-mono` on
@@ -253,7 +290,10 @@ export function AgentChat({
   // Drawers/sheets are mutually exclusive — at most one open. A single value makes that invariant
   // unrepresentable to violate.
   const [drawer, setDrawer] = useState<Drawer>(null);
-  const closeDrawer = () => setDrawer(null);
+  const closeDrawer = () => {
+    setDrawer(null);
+    setPull(0);
+  };
 
   // ── ZEN MODE — chrome-free, mirror-only viewing ───────────────────────────────
   // On a phone the chrome IS most of the viewport: measured at 390x844 this route spends 199px above
@@ -310,10 +350,30 @@ export function AgentChat({
 
   const gone = !agent;
 
-  // Swipe up (or just tap) the handle above the composer to bring up the pane switcher. A lowish
-  // threshold + a taller hit area (below) make the gesture easy to land with a thumb; tapping is the
-  // reliable fallback. "Up" naturally reveals a bottom sheet without fighting the mirror's scroll.
-  const swipe = useSwipeUp(() => setDrawer("switcher"), 24);
+  // Drag the handle above the composer up to bring up the pane switcher, tracked finger-by-finger
+  // so the sheet peeks up under the thumb rather than appearing on release. Tapping is still the
+  // reliable fallback (the button's own onClick below). `pull` is the live upward travel in px, fed
+  // straight to the switcher BottomSheet's `pull` prop; a release past the open threshold buzzes and
+  // opens for real, a release short of it snaps back to 0. `pullFrom` is the handle's own distance
+  // from the viewport bottom, measured once per gesture (useSheetPull's `onAnchor`) — the handle
+  // sits above the composer, so without it the peek would rise from the screen's bottom edge with
+  // the composer sandwiched between the panel and the thumb dragging it.
+  const [pull, setPull] = useState(0);
+  const [pullFrom, setPullFrom] = useState(0);
+  const sheetPull = useSheetPull({
+    onPull: setPull,
+    onAnchor: setPullFrom,
+    onOpen: () => {
+      buzz();
+      setDrawer("switcher");
+      setPull(0);
+      setPullFrom(0);
+    },
+    onCancel: () => {
+      setPull(0);
+      setPullFrom(0);
+    },
+  });
   // ── COMPOSING MODE — read ONCE, here, for the whole pane ──────────────────────
   // The soft keyboard takes roughly 45% of a phone. What is left has to hold the header, the tab
   // strip, the agent's statusline, the grab handle, the status band, the controls row and the draft
@@ -358,12 +418,40 @@ export function AgentChat({
   // imposes, so there is nothing to record.
   const stripsPref = useStripsCollapsed();
   const [keyboardFold, setKeyboardFold] = useState<boolean | null>(null);
+  // ── AND WHOSE KEYBOARD IT IS, WHICH `composing` CANNOT ANSWER ────────────────
+  // `useKeyboardOpen` watches the viewport, so it says a keyboard is up and never says what asked
+  // for it — correct for the switcher and the statusline, which spend pixels the keyboard took
+  // whoever is typing. It is NOT enough here, because THE THING THAT FOLDS CONTAINS AN INPUT: the
+  // tab and pane actions sheets are rendered by TabStrip/PaneStrip, inside this band, and their
+  // rename field autofocuses. The operator taps Rename, the field's own keyboard opens, `composing`
+  // flips, the band folds, and 240ms later `Collapse` unmounts the strip — taking the sheet and the
+  // half-typed name with it. Nothing can be renamed on a phone at all. (The sheets stay in the band
+  // deliberately: they belong to the row that owns them. The gate is the fix, not a hoist.)
+  //
+  // So the auto-fold asks the second question too: is this the COMPOSER's keyboard? Only the
+  // composer's field is down at the bottom under the space this band would give back; a keyboard
+  // raised by anything else took its pixels from somewhere else and buys no fold here.
+  //
+  // OWNERSHIP IS LATCHED, not read live, and that is not an optimisation. Focus leaves the composer
+  // for every control the operator touches while typing — including the summary bar that puts these
+  // rows BACK — and a live read would hand the band back to `stripsPref` mid-gesture and let that
+  // tap write the device preference it is explicitly not allowed to write. So the composer claims
+  // the keyboard while it holds focus under one, and only the keyboard CLOSING releases the claim.
+  const composerHasFocus = useComposerFocus();
+  const [composerKeyboard, setComposerKeyboard] = useState(false);
   useEffect(() => {
-    if (!composing) setKeyboardFold(null);
-  }, [composing]);
-  const stripsFolded = composing ? (keyboardFold ?? true) : stripsPref;
+    if (!composing) {
+      setComposerKeyboard(false);
+      return;
+    }
+    if (composerHasFocus) setComposerKeyboard(true);
+  }, [composing, composerHasFocus]);
+  useEffect(() => {
+    if (!composerKeyboard) setKeyboardFold(null);
+  }, [composerKeyboard]);
+  const stripsFolded = composerKeyboard ? (keyboardFold ?? true) : stripsPref;
   function toggleStrips() {
-    if (composing) {
+    if (composerKeyboard) {
       setKeyboardFold(!stripsFolded);
       return;
     }
@@ -409,6 +497,17 @@ export function AgentChat({
   // against it would blind the guard to drift that happened before the freeze (live-vs-live always
   // matches). While following, the frozen pair IS the live pair by definition.
   const [following, setFollowing] = useState(true);
+  // The same intent, mirrored out to lib/poll-intent so the POLLER can see it: it is mounted at the
+  // data root, above this subtree, and a mirror the operator has scrolled away from is not one to
+  // keep re-reading quickly (hooks/use-polling.ts). Published from an effect on the value rather
+  // than from each of the eight call sites that set it, so the store can never learn about a change
+  // that the mirror itself did not take.
+  useEffect(() => {
+    publishFollowing(following);
+  }, [following]);
+  // Leaving the pane hands the flag back to its "nothing is open" value. Without this, closing a
+  // pane you had scrolled up in would leave the poller believing nobody is following anything.
+  useEffect(() => () => publishFollowing(true), []);
   const [shown, setShown] = useState({ text, revision });
   useEffect(() => {
     if (!following) return;
@@ -614,6 +713,9 @@ export function AgentChat({
         setStatus(refusal, "error");
         return false;
       }
+      // A prompt button is a send too — the same "watch this land" moment as the composer's Send,
+      // just with the keys chosen for you.
+      stampSend(paneId);
       const base = {
         paneId,
         scope,
@@ -981,24 +1083,31 @@ export function AgentChat({
           // callbacks rather than unrendered buttons; the sheet hides a row it was given no callback for.
           rightLead={
             agent ? (
-              <button
-                type="button"
-                onClick={() => setDrawer("paneMenu")}
-                aria-label={t("chat.paneMenu.aria")}
-                // A real 44px box, stated, for the same reason SettingsGear states one and with no
-                // negative margin for the same reason: the two icons this replaces were size-8 with
-                // `-mr-1`, i.e. 32px drawn and 28px of unshared hit area at the very edge of the row.
-                // One control can afford the floor.
-                className="grid size-11 place-items-center rounded-lg text-muted-foreground transition-colors active:bg-muted/60"
-              >
-                <EllipsisVertical className="size-5" />
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setDrawer("paneMenu")}
+                  aria-label={t("chat.paneMenu.aria")}
+                  // A real 44px box, stated, for the same reason SettingsGear states one and with no
+                  // negative margin for the same reason: the two icons this replaces were size-8 with
+                  // `-mr-1`, i.e. 32px drawn and 28px of unshared hit area at the very edge of the row.
+                  // One control can afford the floor.
+                  className="grid size-11 place-items-center rounded-lg text-muted-foreground transition-colors active:bg-muted/60"
+                >
+                  <EllipsisVertical className="size-5" />
+                </button>
+              </>
             ) : undefined
           }
         >
           {/* Title block: the agent's brand logo and the space › tab share line 1 (the agent name
               would just repeat the icon, so it's dropped), and the working directory has line 2 to
-              itself. Tapping it leaves the pane for the space overview (all its tabs + panes). */}
+              itself. Tapping it leaves the pane for the space overview (all its tabs + panes).
+
+              Wrapped in HeaderStatus: while a status is live (lib/status.ts) it takes this whole
+              slot over, in the same box, rather than floating a toast over the tab strip's own "+"
+              — see that component's header for the reasoning and what replaced. */}
+          <HeaderStatus>
           {agent ? (
             <button
               type="button"
@@ -1163,13 +1272,15 @@ export function AgentChat({
               <span className="truncate font-semibold">{t("chat.header.agentGone")}</span>
             </div>
           )}
+          </HeaderStatus>
         </RouteHeader>
 
-        {/* Content region below the header — the mirror inside is the scroller. `relative` is load-
-            bearing and stays: <ToastViewport dock="top"> below is `absolute`, so THIS element is the
-            positioned ancestor it resolves against. That is also how the toast lands below the sticky
-            header — by geometry, because it sits in the region the header ends at, rather than by
-            anyone measuring the header's height and keeping the number in sync. */}
+        {/* Content region below the header — the mirror inside is the scroller. `relative` is for the
+            zen exit button below (`absolute right-3 top-3`), the one thing in this region still
+            positioned against it — the status toast that used to need it too is gone from this
+            screen's non-zen path: it now rides in the header's own title slot (HeaderStatus, wrapped
+            around RouteHeader's children above) rather than floating over this region. See that
+            component's header for why. */}
         <div
           className={cn(
             "relative flex min-h-0 min-w-0 flex-1 flex-col",
@@ -1213,33 +1324,26 @@ export function AgentChat({
           )}
 
           {/* The status line — "Sent", "wrap changed", a send error. An EVENT in DESIGN.md §11's
-              sense: it passes on its own, so it FLOATS and never holds space. It was an ordinary row
-              in this column once, and that is the whole argument — every "Sent" pushed the tab strip,
-              the pane strip and the mirror down ~30px and pulled them back up 2.5s later, so the page
-              jumped twice to say one word.
+              sense: it passes on its own, so on every OTHER screen it FLOATS and never holds space.
+              On THIS screen it no longer floats over content at all: it rides in the header's own
+              title slot (HeaderStatus, wrapped around RouteHeader's children above), because a toast
+              docked at the top of this region sat exactly where the tab strip's "+" (new tab) lives
+              — the first status a fresh tab ever earns ("Tab ready") landed on the control the
+              operator had just tapped to make it. The strip was never free real estate; it is where
+              the control you just pressed lives. Floating the toast over the TERMINAL TAIL instead
+              (the newest output, the reason the screen is open) was tried on this very screen even
+              earlier and reverted too — see ToastViewport's own doc for that experiment.
 
-              `dock="top"`, and this is the screen that makes the choice. The other two routes float
-              their toasts at the bottom; here the bottom is the composer, and covering the control
-              you just pressed to make the toast appear is the worst square on the page. The top of
-              this region is the tab strip and the pane strip — chrome nobody reads while waiting on a
-              send, and the cheapest real estate here. Floating it over the TERMINAL TAIL instead (the
-              newest output, the reason the screen is open) was tried on this very screen and
-              reverted; that is the experiment ToastViewport's own doc cites, and everything else —
-              the z-40 rung, the pointer-events split StatusArea completes, why absolute and not fixed
-              — is stated there once and deliberately not repeated here.
-
-              No wrapper of ours and no className: ToastViewport states the gutter and the top inset
-              itself, and a second set here would add to them rather than replace them. */}
-          {/* `dock={zen ? "bottom" : "top"}`, and the switch is this route's own argument read back.
-              Top is chosen HERE because the bottom of this screen is the composer and covering the
-              control you just pressed is the worst square on the page. In zen there is no composer,
-              and the top-right corner is where the one way out stands — so the reason for top is
-              gone and the reason against it has arrived. StatusArea stays MOUNTED either way: it
-              renders nothing when idle, and it is the only surface a prompt-tap failure ("menu
-              changed", a read-only refusal) has. Hiding it would silently eat errors. */}
-          <ToastViewport dock={zen ? "bottom" : "top"}>
-            <StatusArea />
-          </ToastViewport>
+              Zen has no header row to ride in, so it keeps the old bottom-docked toast: there is no
+              composer to collide with in zen either, so `dock="bottom"` costs it nothing.
+              `StatusArea` stays MOUNTED here either way — it renders nothing when idle, and it is
+              zen's only surface for a prompt-tap failure ("menu changed", a read-only refusal).
+              Hiding it would silently eat errors. */}
+          {zen && (
+            <ToastViewport>
+              <StatusArea />
+            </ToastViewport>
+          )}
 
           {/* THE CHROME ABOVE THE MIRROR, AS ONE ROW THAT LEAVES. In zen these four surfaces go
               together — they are Collie talking about the pane, not the pane's own output — and they
@@ -1311,6 +1415,7 @@ export function AgentChat({
                     selected={agent.tabId}
                     onSelect={(id) => id && goToTab(id)}
                     onNewTab={newTab}
+                    creatingTab={creatingTab.has(agent.workspaceId)}
                     allowAll={false}
                     scope={scope}
                     readOnly={readOnly}
@@ -1674,18 +1779,26 @@ export function AgentChat({
                   1.04:1 against the inverted mirror. index.css states the whole argument. */}
               <div data-slot="chrome-block" className="border-t border-rule bg-chrome">
                 {/* …and stands down while the keyboard is up, for 30px (`py-3` around the 6px
-                    grip — it was py-3.5/34px until the 2026-08-31 shave; the swipe threshold is
-                    24px and the strip is full-width, so the gesture still lands). Switching panes
-                    is a
+                    grip, it was py-3.5/34px until the 2026-08-31 shave; the drag is tracked from
+                    the first pixel past useSheetPull's own slop, and the strip is full-width, so the
+                    gesture still lands). Switching panes is a
                     BEFORE-typing act, so the row costs its height at the one moment it cannot be
                     wanted. Nothing is stranded: the tab strip above still switches, the sheet is still
                     reachable the instant the keyboard closes, and `Collapse` unmounts the button at
-                    the end of the exit so it leaves the tab order with the pixels. */}
-                <Collapse open={!composing && agents.length + shellPanes.length > 0}>
+                    the end of the exit so it leaves the tab order with the pixels.
+
+                    Also shown whenever launchers are declared, even with a single pane and no
+                    shells: a lone pane with launchers still needs a way to reach them. */}
+                <Collapse
+                  open={
+                    !composing &&
+                    (agents.length + shellPanes.length > 0 || launchers.length > 0)
+                  }
+                >
                   <button
                     type="button"
                     aria-label={t("chat.switcher.aria")}
-                    {...swipe}
+                    ref={sheetPull.ref}
                     onClick={() => setDrawer("switcher")}
                     className="flex w-full touch-none items-center justify-center py-3 transition-colors active:bg-muted/50"
                   >
@@ -1730,11 +1843,16 @@ export function AgentChat({
         </div>
 
         {/* Swipe-up quick switcher — just the panes (agents + shells), reached by the thumb gesture.
-            Switch-only: pane closing lives in the pane pill's long-press sheet, not here. */}
+            Switch-only for panes: pane closing lives in the pane pill's long-press sheet, not here.
+            A trailing Launch section rides along (see ThreadSidebar): this is the launcher's other
+            home now that the pane header's rocket is gone, and the one reachable from inside a pane
+            without going home first. `pull` is the only BottomSheet this drag reveal drives. */}
         <BottomSheet
           open={drawer === "switcher"}
           onClose={closeDrawer}
           title={t("chat.switcher.title")}
+          pull={pull}
+          pullFrom={pullFrom}
         >
           <ThreadSidebar
             agents={agents}
@@ -1747,6 +1865,30 @@ export function AgentChat({
             // they'd otherwise bury the agents you opened this sheet to reach.
             shellsOpen={openForCount(dash.prefs.shellsOpen, shellPanes.length)}
             onShellsOpenChange={dash.setShellsOpen}
+            launchers={launchers}
+            launchersHome={launchersHome}
+            // Withheld on a read-only device: the same gate the dashboard's own LaunchStrip needs
+            // is enforced in useSpaceActions().launch itself, but leaving onLaunch undefined here is
+            // what hides the section rather than offering a write the bridge would refuse anyway.
+            // A host-level refusal (this pane's own machine, not the device) keeps the section but
+            // disables each row instead — see `launchRefusal` below.
+            onLaunch={
+              readOnly
+                ? undefined
+                : (command: string) => {
+                    // Close first: the launch navigates into the new pane, and a sheet still up
+                    // while the route changes under it would have to be dismissed on the screen
+                    // you just arrived at (same order the deleted LaunchSheet used).
+                    closeDrawer();
+                    // Beside THIS pane — the switcher's launch always opens a tab in this pane's
+                    // Space, on this pane's own host (server.ts resolves `paneId` there).
+                    void launch(command, paneId);
+                  }
+            }
+            launching={launching}
+            launchRefusal={hostBlock}
+            launchOpen={openForCount(dash.prefs.launchOpen, launchers.length)}
+            onLaunchOpenChange={dash.setLaunchOpen}
             className="px-0 py-1"
           />
         </BottomSheet>

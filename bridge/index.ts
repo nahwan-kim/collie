@@ -79,6 +79,8 @@ import {
   silenceOf,
   STANDBY_PREFIX,
   standbyPortOf,
+  standbyUpdateAnswer,
+  withStandbyVersion,
   warrantNamesSelf,
   type StandbyFacts,
 } from "./pack/standby.ts";
@@ -107,7 +109,7 @@ import { enrollmentOf, TrustStore, type TrustStoreData, type Warrant } from "./p
 import { currentWarrant, discardForeignWarrant, refreshWarrant, type WarrantPush } from "./pack/warrant.ts";
 import { Push } from "./push.ts";
 import { pluginRoot } from "./root.ts";
-import { startServer } from "./server.ts";
+import { buildId, startServer } from "./server.ts";
 import {
   deriveConfigRoot,
   herdTagFor,
@@ -121,8 +123,16 @@ import {
   githubTagsFetcher,
   UpdateMonitor,
   UpdateStateStore,
+  updateDigestBody,
 } from "./update.ts";
 import { SWEEP_INTERVAL_MS, sweepUploads } from "./uploads.ts";
+import { readUpdateRun, updateLockHeld } from "./update-run.ts";
+import {
+  parsePreflightReport,
+  PreflightCache,
+  preflightCommand,
+  updateStartCommand,
+} from "./update-action.ts";
 import { collieVersionBare } from "./version.ts";
 
 // How often the registry rescans the filesystem for sessions that appeared/disappeared after boot.
@@ -562,17 +572,107 @@ const updateMonitor = new UpdateMonitor({
   now: Date.now,
   // The `updates` notify pref is the off-switch — update pushes bypass snooze, so this is their gate.
   updatesEnabled: () => notifyPrefs.current().updates,
-  notify: (latest) =>
+  // Read from disk on every snapshot, never cached: the file is written by the DETACHED UPDATER, a
+  // different process, and noticing its transitions is the whole job (M15/04). Reading it here is
+  // also what makes a bridge restarted BY an update resume reporting that run at startup instead of
+  // saying nothing happened.
+  runState: () => readUpdateRun(cfg.stateDir),
+  // One push a DAY, naming every release folded into it — the digest decides that; this only renders it.
+  notify: (versions) =>
     void push.send({
       type: "update",
       tag: "collie:update",
       // No command in the body — the tap opens Settings (target below), and the update banner / linked
       // release page carry the location-independent Herdr actions. Keeps this off the cwd-dependent path.
       title: "Collie update available",
-      body: `Version ${latest} is available`,
+      body: updateDigestBody(currentVersion, versions),
       target: "settings",
     }),
 });
+
+// ── The update ACTION's two spawns (M15/05) ──────────────────────────────────
+// The bridge decides nothing about an update: it runs the operator's own verb and reads the
+// operator's own preflight. Both are subprocesses, and a subprocess is index.ts's business — the
+// same arrangement the mux adapters and the front door already have. `bridge/server.ts` sees three
+// functions (`UpdateActionDeps`) and no `Bun.spawn` at all.
+//
+// WHICH BINARY. `bin/collie` in the checkout when there is one — that is what the operator's own
+// `collie update` would run, and on a compiled install it is exactly `process.execPath`. The
+// fallback matters for the source-mode bridge (`bun bridge/index.ts`), where `execPath` is Bun
+// itself: there, with no compiled binary present, there is nothing honest to spawn, and the route
+// answers 503 rather than shelling out to something that is not Collie.
+const collieBinary = join(rootDir, "bin", "collie");
+const canRunUpdate = existsSync(collieBinary);
+// How long `collie update --check --json` may take before the bridge stops waiting. It asks git for
+// the remote's tags over the network, so it is not instant; past this, "no report" is the answer,
+// which REFUSES an update rather than allowing one.
+const PREFLIGHT_TIMEOUT_MS = 30_000;
+const preflightCache = new PreflightCache({
+  now: Date.now,
+  run: async () => {
+    // `--local`: this instance only. The card updates the lead alone (ADR 0016), and the member
+    // walk would run over an SSH agent this service does not have — see `preflightCommand`.
+    const child = Bun.spawn(preflightCommand(collieBinary), {
+      cwd: rootDir,
+      stdout: "pipe",
+      // Piped, never ignored: when the report cannot be read, git's own words on this stream are
+      // the only thing that says why, and a service log is where the operator looks.
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    const timer = setTimeout(() => child.kill(), PREFLIGHT_TIMEOUT_MS);
+    try {
+      const [stdout, stderr] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      // A RED preflight exits non-zero and still prints a perfectly good report, so the exit code is
+      // deliberately not consulted for the ANSWER: the document is the answer, and its absence is
+      // the failure. It is consulted for the LOG, below, and only there.
+      const code = await child.exited;
+      const unreadable = parsePreflightReport(stdout) === null;
+      if (unreadable || (code !== 0 && stderr.trim() !== "")) {
+        const tail = stderr.trim().split("\n").slice(-5).join(" / ");
+        console.warn(
+          `[update] preflight exited ${code}${unreadable ? " with no readable report" : ""}${tail === "" ? "" : `: ${tail}`}`,
+        );
+      }
+      return { stdout };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+});
+const updateAction = canRunUpdate
+  ? {
+      preflight: (force?: boolean) => preflightCache.get(force),
+      lockHeld: () => updateLockHeld(cfg.stateDir),
+      start: ({ major }: { major: boolean }) => {
+        const command = updateStartCommand({
+          platform: process.platform,
+          binary: collieBinary,
+          major,
+          stamp: String(Date.now()),
+          hasSystemdRun: Bun.which("systemd-run") !== null,
+          hasSetsid: Bun.which("setsid") !== null,
+        });
+        try {
+          const child = Bun.spawn(command, {
+            cwd: rootDir,
+            stdout: "ignore",
+            stderr: "ignore",
+            stdin: "ignore",
+          });
+          // Never waited on, and never held open: `collie update` stages and then restarts this very
+          // process. The record on disk is how the phone follows it from here (M15/04).
+          child.unref();
+          return { ok: true as const };
+        } catch (err) {
+          return { ok: false as const, reason: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    }
+  : undefined;
 
 // First check delayed (don't probe mid-boot); then every few hours. unref() so neither timer holds
 // the process open; both cleared on shutdown.
@@ -1211,6 +1311,10 @@ async function performTakeover(deviceLabel: string): Promise<{ ok: boolean; mess
 
 /** The door proper — peer-only. A lead binds the port above for its health answer and nothing else. */
 const standbyDoor = standbyStore === null ? null : createStandbyDoor({
+  // What this machine is running, for the updater's health gate reading this port (M15/05) — the
+  // same `<semver>+<sha>` `/api/health` answers with, and the same bundle id `/api/config` reports.
+  version: packVersion,
+  build: () => buildId(),
   facts: (): StandbyFacts => {
     const held = trustStore.current();
     const roster = held?.standbyRoster ?? [];
@@ -1265,11 +1369,19 @@ const standbyServer =
           // DEPOSED collie fails the check (§18.12), a LEAD passes it, and a peer holding a warrant
           // runs the door. A path nobody owns gets a bare 404 with no body worth reading — three
           // routes exist on this port and nothing else does.
+          // `/standby/update` FIRST, before every role: an update restarts the front door, so this
+          // is the one door still answering in the window the operator most wants to look (M15/04).
+          // It is the same file `/api/update/check` reports, read through the same staleness rule.
+          const update = standbyUpdateAnswer(req, url, () => readUpdateRun(cfg.stateDir));
+          if (update !== null) return withStandbyVersion(update, packVersion);
           const answered =
             deposed !== null
               ? deposedAnswer(deposed, outcomeNow(deposed, leadContact.facts()), url)
               : (frontDoorHealth(pack.mode, url) ?? (standbyDoor === null ? null : await standbyDoor(req, url)));
-          return answered ?? new Response("not found", { status: 404 });
+          // STAMPED HERE, ONCE, so it covers every answer this port can make — including the 404 for
+          // a path nobody owns and the deposed page, which are exactly the answers a runner probing a
+          // machine mid-update is most likely to meet (M15/05).
+          return withStandbyVersion(answered ?? new Response("not found", { status: 404 }), packVersion);
         },
       });
 
@@ -1293,6 +1405,13 @@ const server = startServer({
   snooze,
   notifyPrefs,
   updateMonitor,
+  // The preflight and the handoff, or undefined on an install with no compiled binary to run —
+  // where the route answers 503 and the phone says so (M15/05).
+  updateAction,
+  // The bare `<semver>+<sha>` this process answers `/api/health` and `/pack/v1/hello` with — one
+  // string, resolved once, so the detached updater's health gate and a peer can never be told two
+  // different things about this machine (M15/04).
+  version: packVersion,
   audit,
   activity,
   pack,

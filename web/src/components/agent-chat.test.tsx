@@ -17,15 +17,17 @@ vi.mock("@/lib/wizard-action", () => ({
 }));
 
 import { server } from "@/test/setup";
-import { clearStatus } from "@/lib/status";
+import { clearStatus, setStatus } from "@/lib/status";
 import { setZenEnabled, __resetZen } from "@/lib/zen";
 import { setStripsCollapsed, __resetStripsCollapsed } from "@/lib/strips-collapsed";
+import { __resetOperatorCommands } from "@/lib/operator-config";
 import { submitPromptOption } from "@/lib/prompt-action";
 import { submitWizardKeys } from "@/lib/wizard-action";
 import { fixtureAgents, fixtureShellPanes, fixtureTabs } from "@/test/handlers";
 import { PackProvider } from "./pack-provider";
 import type { AgentStatus, AgentView, ServerSummary, TabView } from "@/lib/types";
 import { withHeaderHost } from "@/test/header-host";
+import { COLLAPSE_MS } from "./ui/collapse";
 import { AgentChat } from "./agent-chat";
 
 // The detail view's core job: type a reply and submit it to the bridge. This drives the whole wired
@@ -44,6 +46,10 @@ beforeEach(() => {
   // Same shape, same reason: a case that folds the strips would otherwise leave every later case
   // rendering a bead bar it never asked for.
   __resetStripsCollapsed();
+  // Same shape once more: launchers.toml's rows are cached for the life of the page (one successful
+  // /api/config read), so a case that declares launchers would otherwise leak them into every case
+  // that comes after it.
+  __resetOperatorCommands();
 });
 
 function renderChat(overrides: Partial<ComponentProps<typeof AgentChat>> = {}) {
@@ -852,6 +858,49 @@ describe("AgentChat — shared header: stale-status dimming", () => {
     expect(badge).toHaveClass("opacity-40"); // not live → frozen status dimmed
     act(() => setError(false)); // snapshot recovers → live
     expect(badge).not.toHaveClass("opacity-40"); // undimmed instantly
+  });
+});
+
+// The pane screen's status used to float over the tab strip (dock="top"), landing on the tab
+// strip's own "+" the moment a fresh tab earned its first status. It now rides in the header's
+// title slot (HeaderStatus) instead — this is the regression test for that move.
+describe("AgentChat — status rides the header title slot, not the tab strip", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    clearStatus();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows a live status in place of the title, and the tab strip's + stays usable", () => {
+    renderChat({ tabs: fixtureTabs });
+
+    // The title is showing, no status yet.
+    expect(screen.getByText("webapp")).toBeInTheDocument();
+
+    act(() => setStatus("Sent", "success"));
+
+    // The title's own text is gone from the header slot — the status replaced it in place.
+    expect(screen.queryByText("webapp")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Sent");
+
+    // The tab strip's "+" never moved and is still enabled — the control the operator just
+    // tapped to earn this exact status, on the old placement, is untouched by the swap.
+    const newTab = screen.getByRole("button", { name: "New tab" });
+    expect(newTab).toBeInTheDocument();
+    expect(newTab).toBeEnabled();
+  });
+
+  it("brings the title back once the status's TTL expires", () => {
+    renderChat({ tabs: fixtureTabs });
+    act(() => setStatus("Sent", "success"));
+    expect(screen.getByRole("status")).toHaveTextContent("Sent");
+
+    act(() => vi.advanceTimersByTime(2500));
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText("webapp")).toBeInTheDocument();
   });
 });
 
@@ -1922,6 +1971,12 @@ describe("AgentChat — folding the tab and pane rows", () => {
     };
   }
 
+  /** Put the caret in the message composer's own field, the way tapping it on a phone would. */
+  function focusComposer() {
+    const field = document.querySelector<HTMLTextAreaElement>('[data-slot="chat-input"]')!;
+    act(() => field.focus());
+  }
+
   it("the keyboard folds the rows whatever the preference says, and an expand under it is not written down", async () => {
     // The keyboard takes roughly 45% of the phone, and these rows are read BEFORE typing, never
     // during it — the same test the pane switcher and the statusline are already judged by.
@@ -1931,6 +1986,9 @@ describe("AgentChat — folding the tab and pane rows", () => {
       renderStrips();
       expect(screen.queryByRole("navigation", { name: "Tabs" })).not.toBeNull();
 
+      // The COMPOSER's keyboard, which is the only one that buys this fold — see the case below for
+      // the one that must not.
+      focusComposer();
       kb.resize(460); // a soft keyboard: -384px, well past the open threshold
       await waitFor(() => expect(screen.queryByRole("navigation", { name: "Tabs" })).toBeNull());
       // The PREFERENCE is untouched — the keyboard is spending the pixels, not choosing for the
@@ -1955,5 +2013,147 @@ describe("AgentChat — folding the tab and pane rows", () => {
     } finally {
       kb.restore();
     }
+  });
+
+  it("does not fold on a keyboard the composer did not ask for — the rename sheet survives its own keyboard", async () => {
+    // THE BUG, from the phone: tap a tab → the actions sheet opens → tap Rename → "things flash" and
+    // the sheet is gone, with nothing renameable on the device at all.
+    //
+    // The sheet is TabStrip's, so it renders INSIDE the band that folds. Its rename field
+    // autofocuses, the field's own keyboard opens, and a fold gated on "is a keyboard up" fires on
+    // it — 240ms later `Collapse` unmounts the strip, the sheet and the half-typed name together.
+    // The keyboard may spend the band's pixels only when it is the COMPOSER's keyboard.
+    const kb = withSoftKeyboard();
+    try {
+      const user = userEvent.setup();
+      renderStrips();
+
+      // Tapping the tab you are already in opens the actions sheet rather than re-selecting.
+      const tabs = screen.getByRole("navigation", { name: "Tabs" });
+      await user.click(within(tabs).getByRole("button", { current: true }));
+      await user.click(screen.getByRole("button", { name: "Rename" }));
+      const field = screen.getByLabelText<HTMLInputElement>("Label");
+      expect(field).toBe(document.activeElement); // the sheet autofocuses it
+
+      kb.resize(460); // the RENAME field's keyboard, not the composer's
+
+      // Past the full exit — `Collapse` unmounts at the end of it, so if the band ever started
+      // closing the strip, the sheet and this field would be gone by now.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, COLLAPSE_MS + 60));
+      });
+
+      expect(screen.queryByRole("navigation", { name: "Tabs" })).not.toBeNull();
+      expect(screen.queryByLabelText("Label")).not.toBeNull();
+      // And still editable, which is the operator's actual complaint.
+      await user.type(field, "x");
+      expect(field.value).toContain("x");
+    } finally {
+      kb.restore();
+    }
+  });
+});
+
+// The pane header's rocket is gone; the switcher sheet is one of its two remaining homes (the other
+// is the dashboard's own LaunchStrip, covered by launch-strip.test.tsx). Same launchers.toml rows,
+// declared here through GET /api/launchers — a session-scoped route (server.ts), never a field on
+// /api/config, so rows come from the host that runs them (PACK_PROTOCOL.md §5).
+/** What `api.launch`'s POST body carries — mirrors lib/api.ts's `LaunchRequestBody`. */
+interface LaunchPostedBody {
+  command?: string;
+  paneId?: string;
+}
+
+describe("AgentChat: Launch section in the switcher", () => {
+  function declareLaunchers() {
+    server.use(
+      http.get("/api/launchers", () =>
+        HttpResponse.json({
+          launchers: [{ command: "rumen-peek", label: "Runs & quota", cwd: "/home" }],
+          home: "/home",
+        }),
+      ),
+      http.post("/api/launch", () =>
+        HttpResponse.json({
+          ok: true,
+          pane: {
+            paneId: "w9:p1",
+            workspaceId: "w9",
+            workspaceLabel: "Runs & quota",
+            tabId: "w9:t1",
+            cwd: "/home",
+          },
+        }),
+      ),
+    );
+  }
+
+  it("shows the Launch section in the switcher when launchers are declared", async () => {
+    declareLaunchers();
+    const user = userEvent.setup();
+    renderChat();
+    await user.click(screen.getByRole("button", { name: "Switch pane" }));
+    expect(await screen.findByText("Launch")).toBeInTheDocument();
+    expect(screen.getByText("Runs & quota")).toBeInTheDocument();
+    expect(screen.getByText("rumen-peek")).toBeInTheDocument();
+  });
+
+  it("closes the sheet and launches when a row is tapped", async () => {
+    declareLaunchers();
+    const user = userEvent.setup();
+    renderChat();
+    await user.click(screen.getByRole("button", { name: "Switch pane" }));
+    await screen.findByText("rumen-peek");
+
+    await user.click(screen.getByText("Runs & quota"));
+    // Closing is the launch's own signal that it landed: the sheet is gone and the switch handle is
+    // reachable again, on a route that is about to change under it.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("launches BESIDE this pane — the request carries this pane's own id", async () => {
+    let posted: LaunchPostedBody | undefined;
+    const agent = fixtureAgents[0]!;
+    server.use(
+      http.get("/api/launchers", () =>
+        HttpResponse.json({
+          launchers: [{ command: "rumen-peek", label: "Runs & quota", cwd: "/home" }],
+          home: "/home",
+        }),
+      ),
+      http.post("/api/launch", async ({ request }) => {
+        // SAFETY: this test's own client call (`api.launch`) is the only thing that can hit this
+        // handler, and it always sends exactly these two fields (lib/api.ts's `LaunchRequestBody`).
+        posted = (await request.json()) as LaunchPostedBody;
+        return HttpResponse.json({
+          ok: true,
+          pane: { paneId: "w9:p1", workspaceId: "w9", workspaceLabel: "Runs & quota", tabId: "w9:t1", cwd: "/home" },
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderChat();
+    await user.click(screen.getByRole("button", { name: "Switch pane" }));
+    await user.click(await screen.findByText("Runs & quota"));
+    await waitFor(() => expect(posted).toEqual({ command: "rumen-peek", paneId: agent.paneId }));
+  });
+
+  it("is not offered on a read-only device", async () => {
+    declareLaunchers();
+    const user = userEvent.setup();
+    renderChat({ device: { enforced: true, device: "spare-phone", authorized: false } });
+    await user.click(screen.getByRole("button", { name: "Switch pane" }));
+    // The sheet itself still opens (it's switch-only otherwise), but nothing in it offers a write
+    // this device isn't authorised to make.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.queryByText("Launch")).toBeNull();
+    expect(screen.queryByText("rumen-peek")).toBeNull();
+  });
+
+  it("does not show the switch handle's launcher affordance when nothing is declared", async () => {
+    const user = userEvent.setup();
+    renderChat();
+    await user.click(screen.getByRole("button", { name: "Switch pane" }));
+    expect(screen.queryByText("Launch")).toBeNull();
   });
 });

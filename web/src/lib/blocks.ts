@@ -21,7 +21,7 @@
 // (find covers the raw mirror only).
 
 import type { AnsiSegment } from "./ansi";
-import { PURE_HORIZONTAL_RULE_GLYPH_CLASS } from "./rule-glyphs";
+import { FRAME_EDGE_GLYPH_CLASS, PURE_HORIZONTAL_RULE_GLYPH_CLASS } from "./rule-glyphs";
 import type { PromptModel } from "./harness/prompt-model";
 import type { WizardModel } from "./harness/wizard-model";
 import type { PreviewSelectModel } from "./harness/preview-model";
@@ -218,35 +218,6 @@ const INTERNAL_LAYOUT_RULE = new RegExp(
 const BOX_DRAWING_GLYPH = /^[\u2500-\u257f]$/u;
 const STATUS_COLUMN_GLYPH = /[│┃║]/u;
 const HORIZONTAL_RULE_GLYPH = new RegExp(`^[${PURE_HORIZONTAL_RULE_GLYPH_CLASS}]$`, "u");
-const DIAGONAL_BOX_GLYPH = /^[╱╲╳]$/u;
-const STRUCTURAL_INNER_GLYPH = new RegExp(
-  `[^\\u2500-\\u257f]|[${PURE_HORIZONTAL_RULE_GLYPH_CLASS}]`,
-  "u",
-);
-
-/** A box endpoint with a vertical connection: corners, verticals, tees, or junctions — never a
- * horizontal-only rule or diagonal. Requiring one at BOTH ends keeps labelled rules wrappable. */
-function isBoxEdge(glyph: string): boolean {
-  return (
-    BOX_DRAWING_GLYPH.test(glyph) &&
-    !HORIZONTAL_RULE_GLYPH.test(glyph) &&
-    !DIAGONAL_BOX_GLYPH.test(glyph)
-  );
-}
-
-function isFramedTerminalRow(row: string): boolean {
-  if (row.length < MIN_NO_WRAP_ROW_LENGTH) return false;
-
-  const first = row[0]!;
-  const last = row[row.length - 1]!;
-  if (!isBoxEdge(first) || !isBoxEdge(last)) return false;
-
-  // Reject contrived runs such as `┌┌┌…`: a real frame has content/padding or a horizontal stroke
-  // between its two structural edges. This keeps the visual classifier narrow without coupling it
-  // to any harness's safety-sensitive input-box grammar. The endpoints cannot satisfy this regex,
-  // so testing the whole row avoids another substring allocation.
-  return STRUCTURAL_INNER_GLYPH.test(row);
-}
 
 function hasInternalLayoutRule(row: string): boolean {
   if (row.length < MIN_NO_WRAP_ROW_LENGTH) return false;
@@ -263,12 +234,21 @@ function hasInternalLayoutRule(row: string): boolean {
   );
 }
 
+// A FRAMED ROW: the first and the last non-space glyph are both frame edges (a boxed TUI menu row, a
+// panel border). Herdr spawns panes at desktop width while a phone mirror shows ~45 columns, so
+// wrapping such a row splits it across two or three ragged visual lines: the frame scrambles and the
+// inverse-video selection is shredded, exactly while the operator drives that menu from the Keys pad.
+// Clipped instead — the selection marker sits at the line's left edge, so what overflows is the part
+// that carries the least. A leading edge alone is NOT enough (`tree` output starts with "│"), and one
+// glyph cannot be both edges.
+const FRAME_ROW = new RegExp(`^\\s*[${FRAME_EDGE_GLYPH_CLASS}].*[${FRAME_EDGE_GLYPH_CLASS}]\\s*$`);
+
 function styledLine(segments: AnsiSegment[]): StyledLine {
   const text = segments.map((segment) => segment.text).join("");
   const row = text.trim();
   return (
     PURE_HORIZONTAL_BORDER.test(row) ||
-    isFramedTerminalRow(row) ||
+    FRAME_ROW.test(text) ||
     hasInternalLayoutRule(row)
   )
     ? { segments, noWrap: true }

@@ -2,11 +2,19 @@
 
 All notable changes to Collie are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
-[Semantic Versioning](https://semver.org/). The newest `## [x.y.z]` heading **must** match the
-`version` in `herdr-plugin.toml`, `package.json`, and `web/package.json` (enforced by
-`scripts/check-version.sh`). See [`CLAUDE.md`](./CLAUDE.md) → *Versioning* for the bump policy.
+[Semantic Versioning](https://semver.org/). Work that has landed but is not released yet is
+collected under `## [Unreleased]`; the release commit renames that heading to `## [x.y.z] -
+YYYY-MM-DD` and opens an empty one above it. The newest *numbered* `## [x.y.z]` heading, which the
+Unreleased heading is not, **must** match the `version` in `herdr-plugin.toml`, `package.json`,
+and `web/package.json` (enforced by `scripts/check-version.sh`). See
+[`CLAUDE.md`](./CLAUDE.md) → *Versioning* for the bump policy.
 
 ## Upgrading
+
+**Already on 1.x?** Run `collie update`, or run
+`herdr plugin action invoke update --plugin herdr.collie`. Check the result with
+`bin/collie version` (or `herdr plugin action invoke version --plugin herdr.collie`). It shows the
+newest tag. The phone PWA updates itself within about a minute; no reload needed.
 
 **Coming from 0.x?** Upgrade with one command. Do not use `collie update`. From the Herdr
 plugin: `herdr plugin action invoke update-major --plugin herdr.collie`. From a checkout you can
@@ -15,10 +23,85 @@ reach: `bin/collie update --major`. Fresh install:
 PATH. Details and rollback: [`docs/upgrading.md`](./docs/upgrading.md) → *Upgrading from 0.x to
 1.0*.
 
-**Already on any 1.x?** `collie update`, or
-`herdr plugin action invoke update --plugin herdr.collie`, is enough.
-
 ## [Unreleased]
+
+## [1.4.1] - 2026-09-03
+
+### Changed
+
+- Update card says "Up to date. Nothing to do." at the top and folds the preflight details unless a check is red or an update is available. ([235ab1b](https://github.com/AltanS/collie/commit/235ab1b))
+
+### Fixed
+
+- The phone's update preflight checks this instance only (`update --check --local`), so an unreachable pack peer no longer turns the lead's card red. ([fd4be21](https://github.com/AltanS/collie/commit/fd4be21))
+- The preflight lists release tags over anonymous HTTPS when `origin` is a GitHub SSH URL, and quotes git's own error, so a missing SSH agent no longer reads as a dead remote. ([fd4be21](https://github.com/AltanS/collie/commit/fd4be21))
+- The update card no longer says "the newest release isn't known yet" right after a restart, its first read now waits briefly for the delayed startup poll instead of answering with a stale null. ([203dd07](https://github.com/AltanS/collie/commit/203dd07))
+
+## [1.4.0] - 2026-09-03
+
+### Changed
+
+- A launcher's `cwd` is optional: pin one and it wins everywhere, leave it out and it means "here", your home dir from the dashboard, that pane's own folder from the switcher. ([7efad18](https://github.com/AltanS/collie/commit/7efad18))
+- Tapped from a pane, a launcher opens a tab beside it instead of a new Space; tapped from the dashboard, a Space, as before. ([7efad18](https://github.com/AltanS/collie/commit/7efad18))
+- Launcher rows read live per host, so on a pack they come from the machine whose row you tapped, never the lead's own file. ([7efad18](https://github.com/AltanS/collie/commit/7efad18))
+- The "Switch pane" sheet rises from its handle and follows the thumb as you drag, instead of appearing at the screen's bottom edge only on release, and it opens with a haptic tick. ([5bfa631](https://github.com/AltanS/collie/commit/5bfa631))
+- On the pane screen a status now shows in the header title instead of floating over the tab strip's own controls. ([5bfa631](https://github.com/AltanS/collie/commit/5bfa631))
+- `collie pack update` is one sequence: preflight every machine, update the lead first, then each peer in turn, health-gated. The first failure stops the run and leaves the rest untouched, with the recovery command named. ([fa57012](https://github.com/AltanS/collie/commit/fa57012))
+- `collie update` stages, then hands the swap to a detached updater: it flips `current`, restarts, polls `/api/health` for 30 s (`COLLIE_UPDATE_HEALTH_TIMEOUT_MS`), and rolls back once by itself if the new version does not answer. Watch it with `collie update --status`. ([d569ffc](https://github.com/AltanS/collie/commit/d569ffc))
+- A linked checkout updates by staging: `collie update` builds a release into a `versions/vX.Y.Z` git worktree and flips the `current` symlink, so a failed build never touches the running install and `collie update --rollback` works on a checkout (ADR 0006, amended) ([7845c87](https://github.com/AltanS/collie/commit/7845c87))
+- Update notifications are a digest: at most one push a day, naming every release it folded, never before 09:00. A patch-only delta rides a weekly digest instead, or a minor that arrives first. ([f05b4de](https://github.com/AltanS/collie/commit/f05b4de))
+
+### Added
+
+- Operator launchers: your own commands, declared in `launchers.toml`, tapped to start. They live on the dashboard and in the "Switch pane" sheet, not in a pane or Space header. (#125) ([12dd5e8](https://github.com/AltanS/collie/commit/12dd5e8))
+- Update Collie from the phone: a settings card with the version, the newest release, the preflight per check and its state, behind `POST /api/update`: same gate as a send, one confirm, and its own confirm for a major. ([3f4caf9](https://github.com/AltanS/collie/commit/3f4caf9))
+- `POST /api/update/snooze` dismisses the current update digest until a newer release and a fresh window. ([f05b4de](https://github.com/AltanS/collie/commit/f05b4de))
+- `collie update --check [--json]`, a read-only preflight over doctor, disk, bun, the tracked-file tree, upstream and the service unit, plus every pack member on a lead. ([8c9e5d4](https://github.com/AltanS/collie/commit/8c9e5d4))
+
+### Fixed
+
+- `pack update --path '~/…'` expands the tilde on the remote's own `$HOME`, not this machine's. ([f05b4de](https://github.com/AltanS/collie/commit/f05b4de))
+- `pack update --host` remembers the ssh route as soon as the probe proves it, not only after a
+  fully successful run. ([f05b4de](https://github.com/AltanS/collie/commit/f05b4de))
+- `bun run test` no longer exits 0 when a test fails: a probe script called process.exit on import. ([b2a86cf](https://github.com/AltanS/collie/commit/b2a86cf))
+- `collie update --check` no longer turns red, and the phone's Update button no longer disables, on a lead whose peer has no ssh record: that fact still shows red on the member, but updating the lead needs no route to a peer, so the top verdict is amber. ([08c0b0b](https://github.com/AltanS/collie/commit/08c0b0b))
+- A table in the mirror pans in its own scroller while the prose around it keeps wrapping, so Wrap no longer has to be turned off to read one. A box-drawn table pans as one unit; a framed row outside a table still does not wrap. (#5, #158) ([8d079ff](https://github.com/AltanS/collie/commit/8d079ff))
+- Codex on a phone: submitted-message rows no longer render as solid black bars in the light theme, and a labelled `─ Worked for … ───` separator stays on one line. (#144) ([0104d27](https://github.com/AltanS/collie/commit/0104d27))
+- The new-tab and new-Space controls show a spinner and ignore a second tap while the create is in flight; the pane list catches up within a poll burst after any create or close. ([d03ccd7](https://github.com/AltanS/collie/commit/d03ccd7))
+
+## [1.3.0] - 2026-09-03
+
+### Changed
+
+- Mirror polling follows what you do: 300ms bursts after a key or a message while the screen keeps changing, 1.5s while you follow a working agent, 4s on the home screen while an agent works, 6s when nothing says you are watching (#156) ([d2cb8a3](https://github.com/AltanS/collie/commit/d2cb8a3))
+
+### Fixed
+
+- Mirror no longer freezes when the soft keyboard or Keys dock shrinks the pane: a scroll that arrives with a changed container height is layout, not the user leaving the bottom (#155) ([1862276](https://github.com/AltanS/collie/commit/1862276))
+- Boxed TUI rows (a `/model` picker, a panel border) stay on one line on a narrow phone mirror instead of wrapping into a scrambled frame; `tree` output and prose still wrap, thanks @alexlee2046 (#156) ([d7a4276](https://github.com/AltanS/collie/commit/d7a4276))
+- Releases publish a linux-arm64 build, so a Raspberry Pi installs instead of 404ing; the from-source docs call the bootstrap script with bash, which it is (#157) ([64c7d7e](https://github.com/AltanS/collie/commit/64c7d7e))
+- Pairing no longer logs `could not stamp lastSeenAt: ENOENT` once a minute: concurrent stamps from one poll tick raced on a shared temp file; writes are serialized and temp names are unique now (#159) ([d4bd3f9](https://github.com/AltanS/collie/commit/d4bd3f9))
+
+## [1.2.0] - 2026-09-02
+
+### Added
+
+- `collie stt test` now sends the two containers a phone actually records, webm/opus and mp4, after the wav probe, and fails with guidance when the provider refuses one; Voxtral on OpenRouter refuses both, whisper-large-v3-turbo accepts them (#148) ([d6d7a1c](https://github.com/AltanS/collie/commit/d6d7a1c))
+
+### Changed
+
+- A refused transcription names the upstream status and the container it was sent as, so the phone's error says which format the provider rejected (#148) ([d6d7a1c](https://github.com/AltanS/collie/commit/d6d7a1c))
+- A functional commit now records one line under `## [Unreleased]` instead of bumping the version; the pre-commit hook enforces both halves, and only the `chore(release):` commit bumps and dates the heading. ([f6805cb](https://github.com/AltanS/collie/commit/f6805cb))
+- The mirror's default font size is 10px, down from 12; a device that already picked a size keeps it ([4b005aa](https://github.com/AltanS/collie/commit/4b005aa))
+- Dashboard rows lead with the pane title beside a small agent tile, with the space and tab as the address beneath; the big tile, the bold space name and its truncation are gone ([c442429](https://github.com/AltanS/collie/commit/c442429))
+
+### Fixed
+
+- Renaming a tab or pane from its sheet works on the phone again; the rename field's own keyboard used to fold the strip band and unmount the sheet mid-edit ([93373ce](https://github.com/AltanS/collie/commit/93373ce))
+- oh-my-pi panes show omp's own π mark, painted with its official three-stop gradient, instead of the initials tile; the brand table now says every mark must be painted, thanks @enieuwy (#151) ([17386ef](https://github.com/AltanS/collie/commit/17386ef))
+- The OMP adapter recognises the open-ended `╰─ <draft>` composer row and standalone status row that OMP 18.1.2 paints on a wide pane; the closed OMP 17 box and the corner-to-corner modal rule are unchanged, thanks @ImArtisann (#149, #150) ([6081520](https://github.com/AltanS/collie/commit/6081520))
+- A notification tap on Android opens the deep-linked pane again when the Collie tab had been discarded; navigate before focus, and fall through to a new window when no tab survives. (#147) ([18cd9cb](https://github.com/AltanS/collie/commit/18cd9cb))
+- Android push notifications show a proper small badge glyph and a full-size Collie mark; the maskable home-screen tile was doing both jobs and rendered as a grey block on the notification ([177a8a9](https://github.com/AltanS/collie/commit/177a8a9))
 
 ## [1.1.0] - 2026-09-01
 

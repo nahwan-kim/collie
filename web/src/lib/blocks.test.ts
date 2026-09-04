@@ -151,11 +151,9 @@ describe("splitLines — no-wrap terminal grid rows", () => {
     expect(joinLines([ansi])).toBe(row);
   });
 
-  it("clips rules and framed rows at twenty glyphs, not below", () => {
+  it("clips pure rules at twenty glyphs, not below", () => {
     expect(classified("─".repeat(19)).noWrap).toBeUndefined();
     expect(classified("─".repeat(20)).noWrap).toBe(true);
-    expect(classified(`╭${"─".repeat(17)}╮`).noWrap).toBeUndefined();
-    expect(classified(`╭${"─".repeat(18)}╮`).noWrap).toBe(true);
   });
 
   // The clip rule and the input-box grammar both call a line a "border", for different consumers
@@ -173,8 +171,6 @@ describe("splitLines — no-wrap terminal grid rows", () => {
     ["labelled rule", `${"─".repeat(20)} Pi ${"─".repeat(20)}`],
     ["mixed rule row", "─".repeat(19) + "╌"],
     ["mixed content", `${"─".repeat(20)}x`],
-    ["repeated corners", "┌".repeat(40)],
-    ["repeated verticals", "│".repeat(40)],
     ["missing right edge", `│ content${" ".repeat(40)}`],
     ["missing left edge", `${" ".repeat(40)}content │`],
     ["diagonal endpoints", `╱${"─".repeat(38)}╲`],
@@ -184,6 +180,46 @@ describe("splitLines — no-wrap terminal grid rows", () => {
     ["prose", "This ordinary prose should retain its normal wrapping behavior."],
   ])("does not mark %s", (_name, text) => {
     expect(classified(text).noWrap).toBeUndefined();
+  });
+});
+
+// A framed ROW, not a rule: both edges are frame glyphs. Wrapping one on a ~45-column phone mirror
+// splits a desktop-width menu across two or three visual lines, which scrambles the frame and shreds
+// the inverse-video selection the operator is steering with the Keys pad (issue #156). The rule is
+// deliberately blind to length and content — a frame is a frame at any width — and needs BOTH edges,
+// which is what keeps `tree` output (a leading "│" and nothing at the end) wrapping as prose does.
+describe("splitLines — no-wrap frame rows", () => {
+  it.each([
+    ["menu row with a selection marker", "│ ▸ gpt-5  │"],
+    ["menu row, unselected", "│   gpt-5-codex                        │"],
+    ["table edge", `┌${"─".repeat(40)}┐`],
+    ["separator row", `├${"─".repeat(40)}┤`],
+    ["heavy separator row", "┣━━┫"],
+    ["heavy frame row", "┏ build ┓"],
+    ["double frame row", "╔ status ╗"],
+    ["indented frame row", "    │ nested menu entry │"],
+    ["frame row with trailing spaces", "│ entry │   "],
+    ["corner row", "┌".repeat(40)],
+    ["vertical row", "│".repeat(40)],
+  ])("marks %s", (_name, text) => {
+    expect(splitLines(parseAnsi(text))[0]!.noWrap).toBe(true);
+  });
+
+  it.each([
+    ["tree branch (leading edge only)", "│   ├── use-polling.ts"],
+    ["tree trunk (leading edge only)", "│"],
+    ["prose", "This ordinary prose should retain its normal wrapping behavior."],
+    ["prose that merely mentions a pipe", "the pipe │ is in the middle of this sentence"],
+    ["trailing edge only", "some text ending in a corner ┘"],
+  ])("does not mark %s", (_name, text) => {
+    expect(splitLines(parseAnsi(text))[0]!.noWrap).toBeUndefined();
+  });
+
+  it("marks a frame row split across ANSI segments (the inverse-video selection)", () => {
+    const row = splitLines(parseAnsi(`│ ${ESC}[7m▸ gpt-5${ESC}[0m  │`))[0]!;
+
+    expect(row.noWrap).toBe(true);
+    expect(joinLines([row])).toBe("│ ▸ gpt-5  │");
   });
 });
 
